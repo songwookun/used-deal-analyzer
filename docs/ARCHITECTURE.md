@@ -73,6 +73,7 @@ Queue-4: NOTIFY_QUEUE      ← 알림/리포트 전송 대기
 | DB | SQLite (개발) → MariaDB (선택) | 로컬 개발 편의상 SQLite로 시작 |
 | 큐 | asyncio.Queue (인메모리) | 회사와 동일한 패턴 |
 | LLM | OpenAI API 또는 Ollama(로컬) | 외부 LLM |
+| 임베딩 | sentence-transformers (all-MiniLM-L6-v2) | 매물 텍스트 벡터화, 유사 매물 검색 |
 | 마이그레이션 | Alembic | 회사와 동일 |
 | 테스트 | pytest + pytest-asyncio | |
 | 알림 | Telegram Bot API 또는 Discord Webhook | 무료 |
@@ -94,6 +95,11 @@ used-deal-analyzer/
 │   │   ├── item_collector.py      # Queue-1: 매물 수집
 │   │   ├── seller_check.py        # Queue-2: 판매자 검증
 │   │   ├── item_validator.py      # Queue-2: 매물 유효성
+│   │   ├── preprocess.py          # 매물 텍스트 전처리
+│   │   ├── embedding.py           # 텍스트 → 벡터 변환
+│   │   ├── similarity.py          # 코사인 유사도 계산
+│   │   ├── similar_search.py      # 유사 매물 검색
+│   │   ├── prompt_builder.py      # S-Prompt 생성
 │   │   ├── price_analyzer.py      # Queue-3: 시세 분석 (LLM)
 │   │   ├── result_save.py         # DB 저장
 │   │   ├── notification_send.py   # Queue-4: 알림 전송
@@ -119,7 +125,7 @@ used-deal-analyzer/
 
 ---
 
-## 6. DB 설계 (7개 테이블 - 회사와 1:1 대응)
+## 6. DB 설계 (8개 테이블 - 회사와 1:1 대응)
 
 ### 6-1. items (매물 마스터) ← consultations 대응
 
@@ -239,6 +245,22 @@ CREATE TABLE watch_keywords (
 );
 ```
 
+### 6-8. item_embeddings (매물 벡터) ← 벡터 유사도 기반 시세 분석용
+
+```sql
+CREATE TABLE item_embeddings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    itemId          TEXT NOT NULL,               -- 매물 ID (문자열)
+    title           TEXT NOT NULL,               -- 원본 제목
+    cleanedTitle    TEXT NOT NULL,               -- 전처리된 제목
+    category        TEXT,                        -- 카테고리
+    price           INTEGER,                     -- 원래 가격
+    analyzedPrice   INTEGER,                     -- 분석된 시세
+    vector          TEXT NOT NULL,               -- 384차원 벡터 (JSON 문자열)
+    createdAt       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
 ---
 
 ## 7. 서비스별 상세 로직
@@ -295,27 +317,31 @@ SKIP 조건:
 - 이미지 없음 (선택)
 ```
 
-### 7-4. price_analyzer (← budget_calc 대응) :star: LLM 사용
+### 7-4. price_analyzer (← budget_calc 대응) :star: LLM + S-Prompt 사용
 
 ```
-역할: LLM으로 매물 분석 + 시세 비교
+역할: 벡터 유사도 기반 유사 매물 검색 + S-Prompt로 LLM 시세 분석
+
+[기존] 매물 → LLM이 처음부터 시세 판단 (하드코딩 프롬프트)
+[변경] 매물 → 벡터화 → 유사 매물 3건 검색 → S-Prompt + LLM 판단
 
 1. ANALYZE_QUEUE에서 매물 꺼내기
-2. LLM API 호출 (OpenAI or Ollama)
-   - 프롬프트: 매물 제목+설명 → 카테고리 분류 + 상태 판별 + 시세 추정
-   - 응답: { category, condition, estimatedPrice, confidence, reason }
-3. price_history에서 해당 카테고리 최근 시세 조회
-4. 시세 대비 차이(%) 계산
-5. result_save 호출
-6. NOTIFY_QUEUE에 push (좋은 매물인 경우만)
-7. pipeline_log 기록
+2. preprocess: 매물 제목에서 불필요 텍스트 제거 (택배비 포함, 직거래 등)
+3. embedding: sentence-transformers로 384차원 벡터 변환
+4. similar_search: item_embeddings DB에서 코사인 유사도 상위 3건 검색
+5. prompt_builder: S-Prompt 생성 (유사 사례 3건 + 새 매물)
+6. LLM API 호출 (OpenAI or Ollama)
+   - 응답: { category, estimatedPrice, priceRange, confidence, reason }
+7. item_embeddings에 벡터 저장 (다음 검색용)
+8. price_history에서 해당 카테고리 최근 시세 조회
+9. 시세 대비 차이(%) 계산
+10. result_save 호출
+11. NOTIFY_QUEUE에 push (좋은 매물인 경우만)
+12. pipeline_log 기록
 
-LLM 프롬프트 예시:
-"다음 중고 매물의 카테고리, 상품 상태(S/A/B/C), 예상 시세를 판별해주세요.
- 제목: {title}
- 설명: {description}
- 판매가: {askingPrice}원
- JSON으로 응답하세요."
+수학적 기반 — 코사인 유사도:
+  cos(θ) = AᵀB / (||A|| × ||B||)
+  결과: 0.0 (무관) ~ 1.0 (동일)
 ```
 
 ### 7-5. result_save (← 회사와 동일)

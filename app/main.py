@@ -5,40 +5,78 @@ import asyncio
 from app.core.queue_manager import QueueManager
 
 
+"""
+[TASK-012] lifespan에 워커 4개 연결
+
+ARCHITECTURE.md 10번 섹션 main.py 뼈대 참고.
+"""
+
+"""
+[요구사항 0] 워커 4개 import
+
+- app.workers.collect_worker에서 collect_worker
+- app.workers.validate_worker에서 validate_worker
+- app.workers.analyze_worker에서 analyze_worker
+- app.workers.notify_worker에서 notify_worker
+"""
+from app.workers.collect_worker import collect_worker
+from app.workers.validate_worker import validate_worker
+from app.workers.analyze_worker import analyze_worker
+from app.workers.notify_worker import notify_worker
+from app.api.routes import router
+
+"""
+   [요구사항 1] 워커 4개를 asyncio.create_task로 시작
+
+   - workers 리스트에 4개 태스크 생성:
+     workers = [
+         asyncio.create_task(collect_worker(queue_mgr)),
+         asyncio.create_task(validate_worker(queue_mgr)),
+         asyncio.create_task(analyze_worker(queue_mgr)),
+         asyncio.create_task(notify_worker(queue_mgr)),
+     ]
+   - print로 "워커 4개 시작 완료" 출력
+"""
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-   """
-    [요구사항]
+    queue_mgr = QueueManager(maxsize=100)
+    app.state.queue_mgr = queue_mgr
+    print("큐 매니저 초기화 완료")
 
-    1. 앱 시작 시 (yield 위쪽)
-       - QueueManager 인스턴스를 생성해주세요
-       - app.state.queue_mgr에 저장해주세요 (API에서 접근할 수 있게)
-       - print로 "큐 매니저 초기화 완료" 출력
-   """
-   queue_mgr = QueueManager(maxsize=100)
-   app.state.queue_mgr = queue_mgr
-   print("큐 매니저 초기화 완료")
+    # 워커 4개를 리스트로 생성
+    workers = [
+        asyncio.create_task(collect_worker(queue_mgr)),
+        asyncio.create_task(validate_worker(queue_mgr)),
+        asyncio.create_task(analyze_worker(queue_mgr)),
+        asyncio.create_task(notify_worker(queue_mgr)),
+    ]
+    print("워커 4개 시작 완료")
 
-   """
-    2. yield
-       - 이 줄을 기준으로 위 = 시작, 아래 = 종료입니다
-       - yield는 그대로 두세요
-   """
-   
-   yield
+    yield
 
+    """
+   [요구사항 2] 앱 종료 시 워커 정리
+
+   - 워커는 while True 무한루프라서 자동으로 안 꺼짐
+   - for w in workers: w.cancel() 로 각 태스크 취소 요청
+   - await asyncio.gather(*workers, return_exceptions=True)
+     → return_exceptions=True 해야 CancelledError가 예외로 안 터짐
+   - await queue_mgr.shutdown()
+   - print로 "워커 종료 완료" 출력
    """
-    3. 앱 종료 시 (yield 아래쪽)
-       - queue_mgr.shutdown()을 await로 호출해주세요
-       - print로 "큐 매니저 종료 완료" 출력
-   """
-   await queue_mgr.shutdown()
-   print("큐 매니저 종료 완료")
+
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+    await queue_mgr.shutdown()
+    print("워커 종료 완료")
 
 app = FastAPI(
     title="중고거래 매물 자동 분석 시스템",
     lifespan=lifespan,
 )
+app.include_router(router)
 
 @app.get("/health")
 async def health_check(request: Request):

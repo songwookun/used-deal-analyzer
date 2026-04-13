@@ -1,19 +1,19 @@
-  # 환경변수 (DB URL, API 키 등 민감 정보)                                                                       
-  .env                                                                                                           
-                                                                                                                 
-  # Python 캐시 (실행 시 자동 생성되는 파일)                                                                     
-  __pycache__/                                                                                                   
-  *.pyc
-                                                                                                                 
-  # SQLite DB 파일 (로컬 개발용, 각자 생성해야 함)
-  *.db                                                                                                           
-                  
-  # IDE 설정 (본인 에디터 설정이라 공유할 필요 없음)                                                             
-  .vscode/                                
-  .idea/                                                                                                         
-                                                                                                                 
-  # 내부 문서 (회사 아키텍처 매핑 포함)
-  docs/
+# 환경변수 (DB URL, API 키 등 민감 정보)
+.env
 
-  # OS 파일 (맥에서 자동 생성)
-  .DS_Store
+# Python 캐시 (실행 시 자동 생성되는 파일)
+__pycache__/
+*.pyc
+
+# SQLite DB 파일 (로컬 개발용, 각자 생성해야 함)
+*.db
+
+# IDE 설정 (본인 에디터 설정이라 공유할 필요 없음)
+.vscode/
+.idea/
+
+# 내부 문서 (회사 아키텍처 매핑 포함)
+docs/
+
+# OS 파일 (맥에서 자동 생성)
+.DS_Store

@@ -10,6 +10,7 @@
 - 판매자 신뢰도 검증 (거래횟수, 매너온도 기반 등급 산정)
 - 매물 유효성 검증 (판매 완료 여부, 가격 범위 필터링)
 - LLM 기반 카테고리 분류 + 시세 추정 (OpenAI / Ollama)
+- 벡터 유사도 기반 유사 매물 검색 + S-Prompt 동적 시세 분석
 - 시세 대비 저렴한 매물 자동 알림 (Telegram / Discord)
 - 일간 분석 리포트 생성
 
@@ -47,6 +48,7 @@
 | DB | SQLite (개발) → MariaDB (운영) | 로컬 개발 편의 → 운영 확장 |
 | 큐 | asyncio.Queue | 인메모리 비동기 큐, 백프레셔(maxsize) 지원 |
 | LLM | OpenAI API / Ollama | 카테고리 분류 + 시세 추정 |
+| 임베딩 | sentence-transformers (all-MiniLM-L6-v2) | 매물 텍스트 벡터화, 유사 매물 검색 |
 | 마이그레이션 | Alembic | 스키마 버전 관리 |
 | 테스트 | pytest + pytest-asyncio | 비동기 테스트 지원 |
 | 알림 | Telegram Bot API / Discord Webhook | 무료, 실시간 알림 |
@@ -68,6 +70,11 @@ used-deal-analyzer/
 │   │   ├── item_collector.py      # 매물 수집 로직
 │   │   ├── seller_check.py        # 판매자 신뢰도 검증
 │   │   ├── item_validator.py      # 매물 유효성 검증
+│   │   ├── preprocess.py          # 매물 텍스트 전처리
+│   │   ├── embedding.py           # 텍스트 → 벡터 변환
+│   │   ├── similarity.py          # 코사인 유사도 계산
+│   │   ├── similar_search.py      # 유사 매물 검색
+│   │   ├── prompt_builder.py      # S-Prompt 생성
 │   │   ├── price_analyzer.py      # LLM 시세 분석
 │   │   ├── result_save.py         # 분석 결과 DB 저장
 │   │   ├── notification_send.py   # 알림 전송
@@ -90,7 +97,7 @@ used-deal-analyzer/
 
 ---
 
-## DB 설계 (7개 테이블)
+## DB 설계 (8개 테이블)
 
 | 테이블 | 역할 |
 |--------|------|
@@ -101,6 +108,7 @@ used-deal-analyzer/
 | `pipeline_logs` | 파이프라인 단계별 처리 로그 |
 | `api_req_res_logs` | 외부 API 호출 요청/응답 로그 (UUID 추적) |
 | `watch_keywords` | 사용자 감시 키워드 + 최대 가격 설정 |
+| `item_embeddings` | 매물 벡터 저장 (유사 매물 검색용) |
 
 ---
 
@@ -131,6 +139,182 @@ used-deal-analyzer/
 
 ### 6. report_generator (리포트 생성)
 - 일간 수집/분석 통계, 카테고리별 시세 동향, 추천 매물 Top N
+
+---
+
+## 벡터 유사도 기반 시세 분석 (S-Prompt)
+
+### 개요
+
+매물 제목/설명을 벡터화하여 과거 유사 매물을 검색하고, S-Prompt 방식으로 LLM에 유사 사례를 동적 삽입하여 시세 분석 정확도를 향상시킵니다.
+
+### 처리 흐름
+
+```
+[기존] 매물 → LLM이 처음부터 시세 판단 (하드코딩 프롬프트)
+
+[변경] 매물 → 벡터화 → 유사 매물 3건 검색 → S-Prompt + LLM 판단
+```
+
+```
+새 매물 입력
+    ↓
+[preprocess] 불필요 텍스트 제거 (택배비 포함, 직거래 등)
+    ↓
+[embedding] sentence-transformers로 384차원 벡터 변환
+    ↓
+[similar_search] DB에서 코사인 유사도 상위 3건 검색
+    ↓
+[prompt_builder] S-Prompt 생성 (유사 사례 3건 + 새 매물)
+    ↓
+[price_analyzer] LLM 시세 분석 → 결과 반환
+    ↓
+[DB 저장] item_embeddings에 벡터 저장 (다음 검색용)
+```
+
+### 수학적 기반: 코사인 유사도
+
+```
+벡터 내적:    AᵀB = Σ(Aᵢ × Bᵢ)
+벡터 크기:    ||A|| = √(Σ Aᵢ²)
+코사인 유사도: cos(θ) = AᵀB / (||A|| × ||B||)
+
+결과: 0.0 (무관) ~ 1.0 (동일)
+```
+
+### item_embeddings 테이블
+
+```sql
+CREATE TABLE item_embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    itemId TEXT NOT NULL,
+    title TEXT NOT NULL,
+    cleanedTitle TEXT NOT NULL,
+    category TEXT,
+    price INTEGER,
+    analyzedPrice INTEGER,
+    vector TEXT NOT NULL,
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### S-Prompt 구조
+
+```
+[고정부 — 역할 + 유형 + 규칙]
+너는 중고거래 시세 분석 전문가다.
+유사 매물을 참고하여 시세를 추정해.
+
+## 카테고리
+- ELECTRONICS: 전자기기
+- FASHION: 의류/잡화
+- FURNITURE: 가구/인테리어
+- HOBBY: 취미/게임/스포츠
+- OTHER: 기타
+
+## 주의
+- 미개봉/새상품은 시세 +10~20%
+- 상태 불량 표기 시 시세 -20~30%
+
+[동적부 — 유사 사례 3건]
+1. "아이폰 15 128GB 새상품" → 85만원 (유사도 0.95)
+2. "아이폰 15 256GB 미개봉" → 95만원 (유사도 0.88)
+3. "아이폰 15 128GB S급" → 78만원 (유사도 0.85)
+
+[파라미터 — 새 매물]
+"아이폰 15 128GB 미개봉 풀박스"
+
+[출력 형식]
+{"category": "ELECTRONICS", "estimatedPrice": 83만원, "confidence": 0.9}
+```
+
+### 핵심 코드
+
+**preprocess.py** — 매물 텍스트 전처리
+```python
+NOISE_PATTERNS = [
+    "택배비 포함", "택배비 별도", "직거래", "택배거래",
+    "네고 가능", "네고 불가", "급처", "떨이",
+    "연락주세요", "문의주세요", "댓글주세요",
+]
+
+def cleanTitle(title: str) -> str:
+    cleaned = title
+    for pattern in NOISE_PATTERNS:
+        cleaned = cleaned.replace(pattern, "")
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
+```
+
+**embedding.py** — 텍스트 → 벡터 변환
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def textToVector(text: str) -> list[float]:
+    return model.encode(text).tolist()
+```
+
+**similarity.py** — 코사인 유사도 계산
+```python
+import math
+
+def cosineSimilarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    normA = math.sqrt(sum(x * x for x in a))
+    normB = math.sqrt(sum(x * x for x in b))
+    if normA == 0 or normB == 0:
+        return 0.0
+    return dot / (normA * normB)
+```
+
+**similar_search.py** — 유사 매물 검색
+```python
+from app.services.similarity import cosineSimilarity
+
+def findSimilarItems(newVector: list[float], allEmbeddings: list[dict], limit: int = 3) -> list[dict]:
+    scored = []
+    for item in allEmbeddings:
+        score = cosineSimilarity(newVector, item["vector"])
+        scored.append({**item, "similarity": round(score, 4)})
+    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    return scored[:limit]
+```
+
+**prompt_builder.py** — S-Prompt 생성
+```python
+def buildAnalysisPrompt(title: str, similarItems: list[dict]) -> str:
+    prompt = """너는 중고거래 시세 분석 전문가다.
+유사 매물을 참고하여 새 매물의 카테고리와 적정 시세를 추정해.
+
+## 카테고리
+- ELECTRONICS: 전자기기 (스마트폰, 노트북, 태블릿 등)
+- FASHION: 의류/잡화 (옷, 신발, 가방 등)
+- FURNITURE: 가구/인테리어
+- HOBBY: 취미/게임/스포츠
+- OTHER: 기타
+
+## 주의
+- 미개봉/새상품은 시세 +10~20%
+- 상태 불량/하자 표기 시 시세 -20~30%
+- 유사 매물이 없으면 일반 시세 기준으로 추정
+
+## 유사 매물
+"""
+    for i, item in enumerate(similarItems, 1):
+        prompt += f"""{i}. "{item['cleanedTitle']}" → {item.get('analyzedPrice', '미분석')}원 (유사도: {item['similarity']})
+"""
+
+    prompt += f"""
+## 새 매물
+{title}
+
+## 응답 (JSON만, 다른 텍스트 없이)
+{{"category": "카테고리코드", "estimatedPrice": 추정가격(숫자), "priceRange": {{"min": 최저, "max": 최고}}, "confidence": 0.0~1.0, "reason": "판단 근거"}}"""
+
+    return prompt
+```
 
 ---
 

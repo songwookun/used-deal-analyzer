@@ -23,12 +23,38 @@
 
 ---
 
-### 남은 TASK (Phase 2)
-- [ ] TASK-013: external_client.py (httpx.AsyncClient 래퍼)
-- [ ] TASK-014: api_req_res_logs 자동 기록
-- [ ] TASK-015: 재시도 로직 (exponential backoff)
-- [ ] TASK-016: mock 서버 만들기
-- [ ] TASK-017: 타임아웃 처리
+## 2026-04-15 (3일차)
+### 완료한 TASK (Phase 2) — ✅ Phase 2 완료!
+- [x] TASK-013: external_client.py (httpx.AsyncClient 래퍼)
+- [x] TASK-014: api_req_res_logs 자동 기록
+- [x] TASK-015: 재시도 로직 (exponential backoff)
+- [x] TASK-016: mock 서버 만들기
+- [x] TASK-017: 타임아웃 처리
+
+### 오늘 배운 것(2026-04-15)
+
+#### httpx.AsyncClient 래퍼 패턴
+- `__init__`은 동기 → AsyncClient를 바로 못 만듦 → `start()`/`close()` 분리 패턴
+- `aclose()`로 닫아야 함 (`close()` 아님)
+- `raise_for_status()`로 4xx/5xx를 한 곳에서 처리 → 호출하는 쪽은 성공만 신경 쓰면 됨
+
+#### API 로그 자동 기록
+- kwargs에서 커스텀 파라미터는 `pop()`으로 빼야 httpx에 안 넘어감
+- `raise_for_status()`는 로그 기록 **후에** 호출 — 안 그러면 실패 로그를 못 남김
+- 4xx/5xx 체크는 `response.is_success` 또는 status_code 범위로 직접 분기
+
+#### Exponential Backoff 재시도
+- 5xx, 네트워크 에러만 재시도 (서버 문제) / 4xx는 재시도 안 함 (클라이언트 문제)
+- 대기 시간: `2 ** attempt` (1초 → 2초 → 4초)
+- `httpx.RequestError`로 네트워크 에러 잡음 (TimeoutException도 하위 클래스라 같이 잡힘)
+
+#### 타임아웃 세분화
+- `httpx.Timeout(connect=, read=, write=)` 로 용도별 분리
+- per-request 오버라이드: kwargs에서 pop한 값이 None이면 timeout을 아예 안 넘겨서 기본값 유지
+
+#### FastAPI 에러 응답
+- Flask처럼 `return {}, 400` 튜플 안 됨 → `JSONResponse(status_code=400, content={})` 사용
+- POST body 받으려면 Pydantic BaseModel 파라미터로 선언
 
 ### 오늘 배운 것(2026-04-13)
 

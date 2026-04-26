@@ -1,57 +1,98 @@
-# AI 중고거래 매물 자동 분석 시스템
+# 중고거래 매물 자동 분석 시스템
 
-중고거래 플랫폼(당근, 번개장터 등)의 매물을 자동 수집하고, LLM으로 시세를 분석한 뒤, 좋은 매물을 알림으로 받아보는 비동기 파이프라인 시스템입니다.
+> **개인 학습 프로젝트.** 회사에서 사용하는 큐 기반 비동기 파이프라인 아키텍처를 다른 도메인(중고거래)으로 1:1 재구현하면서 패턴을 익히는 게 목적입니다.
+
+중고거래 매물을 자동 수집 → 검증 → LLM 시세 분석 → 좋은 매물 알림으로 흐르는 비동기 파이프라인입니다. 데이터 소스는 mock으로 시작해 단계적으로 실제 API/크롤링으로 교체할 예정입니다.
 
 ---
 
-## 주요 기능
+## 진행 현황
 
-- 키워드 기반 매물 자동 수집 (폴링 방식)
-- 판매자 신뢰도 검증 (거래횟수, 매너온도 기반 등급 산정)
-- 매물 유효성 검증 (판매 완료 여부, 가격 범위 필터링)
-- LLM 기반 카테고리 분류 + 시세 추정 (OpenAI / Ollama)
-- 벡터 유사도 기반 유사 매물 검색 + S-Prompt 동적 시세 분석
-- 시세 대비 저렴한 매물 자동 알림 (Telegram / Discord)
-- 일간 분석 리포트 생성
+| Phase | 내용 | 상태 |
+|---|---|---|
+| **Phase 1** | FastAPI + SQLAlchemy 비동기 + asyncio.Queue 4개 + 워커 4개 + 8개 DB 모델 + Alembic + mock 파이프라인 통과 | ✅ 완료 |
+| **Phase 2** | ExternalClient (httpx 래퍼) + api_req_res_logs 자동 기록 + exponential backoff 재시도 + 타임아웃 세분화 + mock 서버 | ✅ 완료 |
+| **Phase 3-1** | 멀티 프로바이더 LLM 클라이언트 (Gemini Flash primary + Groq Llama 3.3 fallback, 자동 quota 전환) | ✅ 완료 |
+| Phase 3-2 | price_analyzer에 LLMClient 통합 + 프롬프트 설계 + JSON Schema 응답 검증 | ⬜ |
+| Phase 3-3 | confidence 기반 분기 처리 | ⬜ |
+| Phase 3-4 | RAG (임베딩 + 벡터 유사도 검색 + S-Prompt) | ⬜ |
+| Phase 4 | Telegram/Discord 실제 알림 + 상태 머신 (PENDING → COMPLETED/FAILED) | ⬜ |
+| Phase 5 | 운영 안정성 (Graceful shutdown, 헬스체크, 통계 API) | ⬜ |
+
+학습 노트는 [`docs/STUDY.md`](docs/STUDY.md) 참고.
 
 ---
 
 ## 아키텍처
 
-4개의 asyncio.Queue로 구성된 비동기 파이프라인입니다. 각 단계는 독립된 Worker가 처리하며, 모든 처리 과정은 pipeline_logs에 기록됩니다.
+4개의 `asyncio.Queue`로 구성된 비동기 파이프라인. 각 단계는 독립된 Worker가 처리하며, 모든 처리 과정이 `pipeline_logs` 테이블에 기록됩니다.
 
 ```
-[크롤러/API]
-     │
-     ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│ COLLECT_QUEUE│───▶│VALIDATE_QUEUE│───▶│ANALYZE_QUEUE │───▶│ NOTIFY_QUEUE │
-│             │    │             │    │             │    │             │
-│ 매물 수집    │    │ 판매자 검증  │    │ LLM 시세분석 │    │ 알림 전송    │
-│             │    │ 매물 검증    │    │             │    │ 리포트 생성  │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-     │                   │                  │                   │
-     ▼                   ▼                  ▼                   ▼
-  [DB 저장]           [DB 저장]          [DB 저장]           [DB 저장]
-  pipeline_log       pipeline_log       pipeline_log       pipeline_log
+[크롤러/API/Mock]
+       │
+       ▼
+┌───────────────┐   ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+│ COLLECT_QUEUE │──▶│ VALIDATE_QUEUE │──▶│ ANALYZE_QUEUE  │──▶│ NOTIFY_QUEUE   │
+│               │   │                │   │                │   │                │
+│ collect_      │   │ seller_check   │   │ price_analyzer │   │ notification_  │
+│ worker        │   │ + item_        │   │ (LLM 호출)     │   │ send           │
+│               │   │ validator      │   │                │   │                │
+└───────────────┘   └────────────────┘   └────────────────┘   └────────────────┘
+       │                   │                     │                     │
+       ▼                   ▼                     ▼                     ▼
+   pipeline_logs       pipeline_logs       pipeline_logs       pipeline_logs
+                                            api_req_res_logs    notification_logs
+                                            (LLM_API)
+```
+
+### LLM 호출 (Phase 3-1)
+
+```
+analyze_worker
+    │
+    ▼
+LLMClient.analyze(prompt, schema)
+    │
+    ├─ 오늘 primary quota 차단 플래그 → 바로 fallback
+    │
+    └─ primary 시도
+         │
+         ├─ 성공 → dict 반환
+         ├─ QuotaExceededError → 차단 기록 + fallback
+         └─ 다른 에러 → raise
+                │
+                ▼
+   ┌──────────────────┐    ┌──────────────────┐
+   │ GeminiProvider   │    │ GroqProvider     │
+   │ (Google AI       │    │ (OpenAI 호환)    │
+   │  Studio)         │    │                  │
+   └──────────────────┘    └──────────────────┘
+              │                    │
+              └────────┬───────────┘
+                       ▼
+              ExternalClient (httpx + 자동 로깅 + 재시도 + 타임아웃)
+                       │
+                       ▼
+              api_req_res_logs (apiType="LLM_API")
 ```
 
 ---
 
 ## 기술 스택
 
-| 구분 | 기술 | 선택 이유 |
-|------|------|-----------|
-| 언어 | Python 3.11+ | 비동기 지원, LLM 생태계 |
-| 웹 프레임워크 | FastAPI | 비동기 네이티브, lifespan으로 백그라운드 워커 관리 |
-| ORM | SQLAlchemy 2.0 (async) | 비동기 세션, expire_on_commit 제어 |
-| DB | SQLite (개발) → MariaDB (운영) | 로컬 개발 편의 → 운영 확장 |
-| 큐 | asyncio.Queue | 인메모리 비동기 큐, 백프레셔(maxsize) 지원 |
-| LLM | OpenAI API / Ollama | 카테고리 분류 + 시세 추정 |
-| 임베딩 | sentence-transformers (all-MiniLM-L6-v2) | 매물 텍스트 벡터화, 유사 매물 검색 |
-| 마이그레이션 | Alembic | 스키마 버전 관리 |
-| 테스트 | pytest + pytest-asyncio | 비동기 테스트 지원 |
-| 알림 | Telegram Bot API / Discord Webhook | 무료, 실시간 알림 |
+| 구분 | 기술 | 비고 |
+|------|------|------|
+| 언어 | Python 3.11+ | 비동기 + 타입 힌트 |
+| 웹 프레임워크 | FastAPI | lifespan으로 백그라운드 워커 관리 |
+| ORM | SQLAlchemy 2.0 (async) | `Mapped[T]` + `mapped_column` |
+| DB | SQLite (`dev.db`) | 학습 단계 단순화. 운영 시 MariaDB 교체 가능 |
+| 큐 | `asyncio.Queue` | 인메모리, 백프레셔(maxsize) |
+| HTTP 클라이언트 | httpx (AsyncClient) | `external_client.py`로 래핑 |
+| LLM (Primary) | **Gemini 2.5 Flash** (Google AI Studio) | 무료, JSON Schema 강제 지원 |
+| LLM (Fallback) | **Groq Llama 3.3 70B** | 무료, OpenAI 호환 API |
+| 임베딩 | sentence-transformers `all-MiniLM-L6-v2` *(Phase 3-4)* | 384차원, 로컬 |
+| 마이그레이션 | Alembic | autogenerate + 비동기 env.py |
+| 설정 | Pydantic Settings | `.env` 자동 로드 |
 
 ---
 
@@ -60,37 +101,39 @@
 ```
 used-deal-analyzer/
 ├── app/
-│   ├── main.py                    # FastAPI 앱 + lifespan (큐/워커 초기화)
+│   ├── main.py                    # FastAPI 앱 + lifespan
 │   ├── core/
-│   │   ├── config.py              # Pydantic Settings (.env 자동 로드)
+│   │   ├── config.py              # Pydantic Settings (.env 로드)
 │   │   ├── database.py            # SQLAlchemy 비동기 엔진/세션
 │   │   └── queue_manager.py       # asyncio.Queue 4개 관리
-│   ├── models.py                  # SQLAlchemy 모델 (7개 테이블)
+│   ├── models.py                  # 8개 테이블 모델
 │   ├── services/
-│   │   ├── item_collector.py      # 매물 수집 로직
-│   │   ├── seller_check.py        # 판매자 신뢰도 검증
-│   │   ├── item_validator.py      # 매물 유효성 검증
-│   │   ├── preprocess.py          # 매물 텍스트 전처리
-│   │   ├── embedding.py           # 텍스트 → 벡터 변환
-│   │   ├── similarity.py          # 코사인 유사도 계산
-│   │   ├── similar_search.py      # 유사 매물 검색
-│   │   ├── prompt_builder.py      # S-Prompt 생성
-│   │   ├── price_analyzer.py      # LLM 시세 분석
-│   │   ├── result_save.py         # 분석 결과 DB 저장
-│   │   ├── notification_send.py   # 알림 전송
-│   │   ├── report_generator.py    # 일간 리포트 생성
-│   │   ├── external_client.py     # 외부 API 호출 래퍼 (로깅/재시도/타임아웃)
-│   │   └── log_helpers.py         # 파이프라인 로그 헬퍼
+│   │   ├── external_client.py     # httpx 래퍼 (로깅/재시도/타임아웃)
+│   │   ├── llm_client.py          # ✨ LLM 멀티 프로바이더 + fallback (Phase 3-1)
+│   │   ├── log_helpers.py         # pipeline_logs 헬퍼
+│   │   ├── item_collector.py      # (예정)
+│   │   ├── seller_check.py        # (예정)
+│   │   ├── item_validator.py      # (예정)
+│   │   ├── price_analyzer.py      # (예정 — Phase 3-2)
+│   │   ├── result_save.py         # (예정)
+│   │   ├── notification_send.py   # (예정 — Phase 4)
+│   │   └── report_generator.py    # (예정)
 │   ├── workers/
-│   │   ├── collect_worker.py      # COLLECT_QUEUE 소비자
-│   │   ├── validate_worker.py     # VALIDATE_QUEUE 소비자
-│   │   ├── analyze_worker.py      # ANALYZE_QUEUE 소비자
-│   │   └── notify_worker.py       # NOTIFY_QUEUE 소비자
+│   │   ├── collect_worker.py      # COLLECT_QUEUE 소비
+│   │   ├── validate_worker.py     # VALIDATE_QUEUE 소비
+│   │   ├── analyze_worker.py      # ANALYZE_QUEUE 소비 (현재 mock 분석)
+│   │   └── notify_worker.py       # NOTIFY_QUEUE 소비 (현재 mock 알림)
 │   └── api/
-│       ├── routes.py              # REST API 엔드포인트
-│       └── schemas.py             # Pydantic 요청/응답 스키마
+│       ├── routes.py              # /api/test-pipeline (mock 투입)
+│       └── schemas.py             # (Phase 3-2 채울 예정)
 ├── alembic/                       # DB 마이그레이션
 ├── tests/                         # 테스트
+├── docs/
+│   ├── ARCHITECTURE.md            # 전체 설계 (큐/DB/서비스 매핑)
+│   ├── DEV_RULES.md               # 개발 룰 (5단계 워크플로우)
+│   ├── STUDY.md                   # 학습 노트 (날짜별)
+│   ├── research.md                # 일감별 리서치 누적
+│   └── code_design.md             # 일감별 코드 설계 누적
 ├── requirements.txt
 └── .env                           # 환경변수 (git 미포함)
 ```
@@ -101,245 +144,120 @@ used-deal-analyzer/
 
 | 테이블 | 역할 |
 |--------|------|
-| `items` | 매물 마스터 (수집~분석~알림 전체 상태 관리) |
-| `item_images` | 매물 이미지 정보 |
+| `items` | 매물 마스터 (수집~분석~알림 전체 상태) |
+| `item_images` | 매물 이미지 |
 | `price_history` | 카테고리별 시세 이력 (스냅샷) |
-| `notification_logs` | 알림 전송 상태 추적 (PENDING → COMPLETED/FAILED) |
+| `notification_logs` | 알림 전송 상태 추적 |
 | `pipeline_logs` | 파이프라인 단계별 처리 로그 |
-| `api_req_res_logs` | 외부 API 호출 요청/응답 로그 (UUID 추적) |
-| `watch_keywords` | 사용자 감시 키워드 + 최대 가격 설정 |
-| `item_embeddings` | 매물 벡터 저장 (유사 매물 검색용) |
+| `api_req_res_logs` | 외부 API 호출 요청/응답 로그 (UUID 추적, LLM 호출 포함) |
+| `watch_keywords` | 사용자 감시 키워드 + 최대 가격 |
+| `item_embeddings` | 매물 벡터 (Phase 3-4 RAG용) |
 
 ---
 
-## 파이프라인 상세
+## LLM 클라이언트 (Phase 3-1 핵심)
 
-### 1. item_collector (매물 수집)
-- watch_keywords 테이블에서 감시 키워드 조회
-- 키워드별 새 매물 검색 + 중복 체크
-- 새 매물을 COLLECT_QUEUE에 push
+### 동작 방식
+- **Primary (Gemini 2.5 Flash)**: 정확도 우선, JSON Schema 강제로 응답 형태 보장
+- **Fallback (Groq Llama 3.3 70B)**: Primary가 일일 quota 소진 시 자동 전환
+- **자동 복구**: 차단 플래그를 날짜로 기록 → 자정 지나면 자동 해제 (별도 cleanup 코드 X)
 
-### 2. seller_check (판매자 검증)
-- 판매자 프로필 조회 (가입일, 거래횟수, 매너온도)
-- 신뢰등급 산정: S(우수) / A(양호) / B(보통) / C(주의) / F(위험)
-- F등급 → SKIP 처리 (사기 의심)
-
-### 3. item_validator (매물 검증)
-- 판매 완료 여부, 가격 범위, 이미지 유무 확인
-- 통과 시 ANALYZE_QUEUE로 전달
-
-### 4. price_analyzer (LLM 시세 분석)
-- LLM API 호출 → 카테고리 분류 + 상태 판별 + 시세 추정
-- price_history와 비교하여 시세 차이(%) 계산
-- 좋은 매물만 NOTIFY_QUEUE로 전달
-
-### 5. notification_send (알림 전송)
-- 시세 대비 저렴한 매물 → Telegram/Discord 알림
-- 전송 실패 시 재시도 (exponential backoff)
-
-### 6. report_generator (리포트 생성)
-- 일간 수집/분석 통계, 카테고리별 시세 동향, 추천 매물 Top N
-
----
-
-## 벡터 유사도 기반 시세 분석 (S-Prompt)
-
-### 개요
-
-매물 제목/설명을 벡터화하여 과거 유사 매물을 검색하고, S-Prompt 방식으로 LLM에 유사 사례를 동적 삽입하여 시세 분석 정확도를 향상시킵니다.
-
-### 처리 흐름
-
-```
-[기존] 매물 → LLM이 처음부터 시세 판단 (하드코딩 프롬프트)
-
-[변경] 매물 → 벡터화 → 유사 매물 3건 검색 → S-Prompt + LLM 판단
-```
-
-```
-새 매물 입력
-    ↓
-[preprocess] 불필요 텍스트 제거 (택배비 포함, 직거래 등)
-    ↓
-[embedding] sentence-transformers로 384차원 벡터 변환
-    ↓
-[similar_search] DB에서 코사인 유사도 상위 3건 검색
-    ↓
-[prompt_builder] S-Prompt 생성 (유사 사례 3건 + 새 매물)
-    ↓
-[price_analyzer] LLM 시세 분석 → 결과 반환
-    ↓
-[DB 저장] item_embeddings에 벡터 저장 (다음 검색용)
-```
-
-### 수학적 기반: 코사인 유사도
-
-```
-벡터 내적:    AᵀB = Σ(Aᵢ × Bᵢ)
-벡터 크기:    ||A|| = √(Σ Aᵢ²)
-코사인 유사도: cos(θ) = AᵀB / (||A|| × ||B||)
-
-결과: 0.0 (무관) ~ 1.0 (동일)
-```
-
-### item_embeddings 테이블
-
-```sql
-CREATE TABLE item_embeddings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    itemId TEXT NOT NULL,
-    title TEXT NOT NULL,
-    cleanedTitle TEXT NOT NULL,
-    category TEXT,
-    price INTEGER,
-    analyzedPrice INTEGER,
-    vector TEXT NOT NULL,
-    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### S-Prompt 구조
-
-```
-[고정부 — 역할 + 유형 + 규칙]
-너는 중고거래 시세 분석 전문가다.
-유사 매물을 참고하여 시세를 추정해.
-
-## 카테고리
-- ELECTRONICS: 전자기기
-- FASHION: 의류/잡화
-- FURNITURE: 가구/인테리어
-- HOBBY: 취미/게임/스포츠
-- OTHER: 기타
-
-## 주의
-- 미개봉/새상품은 시세 +10~20%
-- 상태 불량 표기 시 시세 -20~30%
-
-[동적부 — 유사 사례 3건]
-1. "아이폰 15 128GB 새상품" → 85만원 (유사도 0.95)
-2. "아이폰 15 256GB 미개봉" → 95만원 (유사도 0.88)
-3. "아이폰 15 128GB S급" → 78만원 (유사도 0.85)
-
-[파라미터 — 새 매물]
-"아이폰 15 128GB 미개봉 풀박스"
-
-[출력 형식]
-{"category": "ELECTRONICS", "estimatedPrice": 83만원, "confidence": 0.9}
-```
-
-### 핵심 코드
-
-**preprocess.py** — 매물 텍스트 전처리
+### 사용 예시
 ```python
-NOISE_PATTERNS = [
-    "택배비 포함", "택배비 별도", "직거래", "택배거래",
-    "네고 가능", "네고 불가", "급처", "떨이",
-    "연락주세요", "문의주세요", "댓글주세요",
-]
+from app.services.llm_client import GeminiProvider, GroqProvider, LLMClient
+from app.core.config import settings
 
-def cleanTitle(title: str) -> str:
-    cleaned = title
-    for pattern in NOISE_PATTERNS:
-        cleaned = cleaned.replace(pattern, "")
-    cleaned = " ".join(cleaned.split())
-    return cleaned.strip()
+primary = GeminiProvider(api_key=settings.GEMINI_API_KEY, model=settings.GEMINI_MODEL)
+fallback = GroqProvider(api_key=settings.GROQ_API_KEY, model=settings.GROQ_MODEL)
+client = LLMClient(primary=primary, fallback=fallback)
+
+await client.start()
+result = await client.analyze(
+    prompt="매물 분석 prompt...",
+    schema={"type": "object", "properties": {...}},
+)
+# result = {"category": "ELECTRONICS", "estimatedPrice": 850000, ...}
+await client.close()
 ```
 
-**embedding.py** — 텍스트 → 벡터 변환
-```python
-from sentence_transformers import SentenceTransformer
-
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-def textToVector(text: str) -> list[float]:
-    return model.encode(text).tolist()
-```
-
-**similarity.py** — 코사인 유사도 계산
-```python
-import math
-
-def cosineSimilarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    normA = math.sqrt(sum(x * x for x in a))
-    normB = math.sqrt(sum(x * x for x in b))
-    if normA == 0 or normB == 0:
-        return 0.0
-    return dot / (normA * normB)
-```
-
-**similar_search.py** — 유사 매물 검색
-```python
-from app.services.similarity import cosineSimilarity
-
-def findSimilarItems(newVector: list[float], allEmbeddings: list[dict], limit: int = 3) -> list[dict]:
-    scored = []
-    for item in allEmbeddings:
-        score = cosineSimilarity(newVector, item["vector"])
-        scored.append({**item, "similarity": round(score, 4)})
-    scored.sort(key=lambda x: x["similarity"], reverse=True)
-    return scored[:limit]
-```
-
-**prompt_builder.py** — S-Prompt 생성
-```python
-def buildAnalysisPrompt(title: str, similarItems: list[dict]) -> str:
-    prompt = """너는 중고거래 시세 분석 전문가다.
-유사 매물을 참고하여 새 매물의 카테고리와 적정 시세를 추정해.
-
-## 카테고리
-- ELECTRONICS: 전자기기 (스마트폰, 노트북, 태블릿 등)
-- FASHION: 의류/잡화 (옷, 신발, 가방 등)
-- FURNITURE: 가구/인테리어
-- HOBBY: 취미/게임/스포츠
-- OTHER: 기타
-
-## 주의
-- 미개봉/새상품은 시세 +10~20%
-- 상태 불량/하자 표기 시 시세 -20~30%
-- 유사 매물이 없으면 일반 시세 기준으로 추정
-
-## 유사 매물
-"""
-    for i, item in enumerate(similarItems, 1):
-        prompt += f"""{i}. "{item['cleanedTitle']}" → {item.get('analyzedPrice', '미분석')}원 (유사도: {item['similarity']})
-"""
-
-    prompt += f"""
-## 새 매물
-{title}
-
-## 응답 (JSON만, 다른 텍스트 없이)
-{{"category": "카테고리코드", "estimatedPrice": 추정가격(숫자), "priceRange": {{"min": 최저, "max": 최고}}, "confidence": 0.0~1.0, "reason": "판단 근거"}}"""
-
-    return prompt
-```
+### Quota 소진 감지 신호
+- HTTP 429 (Too Many Requests)
+- 응답 본문에 `RESOURCE_EXHAUSTED` (Gemini) / `rate_limit_exceeded` (Groq) / `quota` 포함
 
 ---
 
 ## 실행 방법
 
 ```bash
-# 의존성 설치
+# 1. 의존성 설치
 pip install -r requirements.txt
 
-# 환경변수 설정
-cp .env.example .env
+# 2. 환경변수 설정 (.env 파일 생성)
+cat > .env << 'EOF'
+DATABASE_URL=sqlite+aiosqlite:///./dev.db
+GEMINI_API_KEY=your_gemini_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
+EOF
 
-# DB 마이그레이션
+# 3. DB 마이그레이션
 alembic upgrade head
 
-# 서버 실행
+# 4. 서버 실행
 uvicorn app.main:app --reload
+
+# 5. mock 매물 1건 파이프라인 통과 테스트
+curl -X POST http://localhost:8000/api/test-pipeline
+
+# 6. 큐 상태 확인
+curl http://localhost:8000/health
+```
+
+### 무료 LLM 키 발급
+- **Gemini**: https://aistudio.google.com → "Get API Key"
+- **Groq**: https://console.groq.com → "API Keys" → "Create API Key"
+
+### Mac 24/7 운영 시
+잠자기 모드 들어가면 워커 정지 → `caffeinate`로 실행 권장:
+```bash
+caffeinate -i uvicorn app.main:app
 ```
 
 ---
 
-## 추후 확장 계획
+## 개발 룰 (5단계 워크플로우)
 
-- 동일 워커 N개 동시 실행으로 동시성 처리 확대
-- asyncio.Queue → Redis Queue로 교체 (영속성 확보)
-- Docker Compose로 DB + 앱 + Redis 구성
-- GitHub Actions CI/CD 파이프라인 구축
-- Streamlit 대시보드로 분석 결과 시각화
+이 프로젝트는 [`docs/DEV_RULES.md`](docs/DEV_RULES.md)의 5단계 워크플로우를 따릅니다:
+
+1. **리서치** → `docs/research.md`에 옵션 비교 누적
+2. **코드 설계** → `docs/code_design.md`에 파일/함수 구조 정리
+3. **코드 구현** → 한 블록씩 설명 후 사용자 확인 → 구현 (반복)
+4. **피드백** → 셀프 점검 + STUDY.md에 학습 정리
+5. **코드 리뷰** → 전체 코드 + 설계 문서 일관성 점검
+
+학습은 코드 안 주석이 아닌 **STUDY.md** 기준입니다. 코드 안 주석은 "왜"가 비자명한 곳에만 한 줄.
+
+---
+
+## 회사 시스템 매핑 (학습 목적)
+
+| 회사 파이프라인 | 본 프로젝트 |
+|---|---|
+| `cs_receiver` (문의 수신) | `item_collector` (매물 수집) |
+| `supplier_check` (셀러 검증) | `seller_check` (판매자 검증) |
+| `product_check` (상품 검증) | `item_validator` (매물 유효성) |
+| `budget_calc` (예산 배정) | `price_analyzer` (LLM 시세 분석) |
+| `result_save` (결과 저장) | `result_save` |
+| `result_send` (결과 전송) | `notification_send` |
+| `reply_register` (답변 등록) | `report_generator` |
+
+---
+
+## 추후 확장 (Phase 5 이후)
+
+- 동일 워커 N개 동시 실행 (concurrency 확대)
+- `asyncio.Queue` → Redis Queue (영속성)
+- Docker Compose로 DB + 앱 통합
+- 실제 데이터 소스 연동 (네이버 쇼핑 검색 API, 번개장터 크롤링 등)
+- Streamlit 대시보드 (분석 결과 시각화)
+
+> ⚠️ 본 프로젝트는 학습용으로, 실제 중고거래 플랫폼의 ToS와 robots.txt를 위반하는 무단 크롤링은 포함하지 않습니다.

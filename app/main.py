@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     workers = [
         asyncio.create_task(collect_worker(queue_mgr)),
         asyncio.create_task(validate_worker(queue_mgr)),
-        asyncio.create_task(analyze_worker(queue_mgr)),
+        asyncio.create_task(analyze_worker(queue_mgr, llm_client)),
         asyncio.create_task(notify_worker(queue_mgr)),
         asyncio.create_task(llm_ping_worker(queue_mgr, llm_client)),
     ]

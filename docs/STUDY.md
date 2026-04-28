@@ -24,8 +24,8 @@
 
 ### Phase 3 — LLM 연동 (진행 중)
 - [x] Phase 3-1: 멀티 프로바이더 LLM 클라이언트 (Gemini primary + Groq fallback) ← 2026-04-26
-- [ ] Phase 3-2: price_analyzer에 LLMClient 통합 + 프롬프트 설계
-- [ ] Phase 3-3: 응답 검증 + confidence 분기
+- [x] Phase 3-2: price_analyzer에 LLMClient 통합 + 프롬프트 설계 ← 2026-04-28
+- [ ] Phase 3-3: 응답 검증 강화 + 카테고리/시세 신뢰도 평가
 - [ ] Phase 3-4 (이후): RAG (임베딩 + 유사 매물 검색 + S-Prompt)
 
 ---
@@ -198,6 +198,54 @@
 - 진짜 lifespan + 진짜 외부 API + 진짜 DB INSERT 한 번 돌려야 회귀 노출
 - 큐 기반 검증 채널(`/_debug/llm-ping`)이 운영 헬스체크 도구로도 영구 활용 가능
 - **검증을 운영 코드와 같은 경로로 흘리는 게 핵심** (별도 스크립트 X)
+
+---
+
+## 2026-04-28 (Phase 3-2: price_analyzer 통합 + 프롬프트 설계)
+
+### 4축 의사결정 (research.md에 비교표)
+- 프롬프트 분할: 단일 프롬프트(분류+시세+이유 한 번에) vs 두 단계 → **단일 채택** (학습 단계 단순성)
+- 메시지 구조: system+user 분리 vs 단일 user → **단일 user 채택** (Gemini/Groq 분기 회피)
+- JSON 강제: Gemini responseSchema + Groq prompt 안내 → **이 조합 채택** (LLMClient 시그니처가 이미 schema 인자 받음)
+- confidence 임계치 처리: notify 차단 vs 별도 status → **notify 차단 채택** (status 가지수 ↓)
+
+### LLM Provider별 schema 처리 비대칭
+- **Gemini**: `responseSchema` 필드로 JSON Schema 강제 → 응답이 schema 위반 0%
+- **Groq**: `response_format: json_object` 만 가능 (구조 강제 X) → prompt에 형식 명시로 대체
+- 두 프로바이더 모두 동일 인터페이스(`analyze(prompt, schema)`)로 추상화. schema 인자는 Groq에선 무시되지만 Gemini에선 활용
+- prompt 안에도 형식 명시 필요 (Groq용) → "두 번 말한다" 처럼 보이지만 fallback 안전장치
+
+### enum 기반 카테고리 강제
+- 카테고리는 자유 문자열이면 모델이 임의 값(`"전자기기"`, `"기타-전자"` 등)을 만들어내서 DB 정합성 깨짐
+- JSON Schema의 `enum: [...]` 으로 8개로 한정 → Gemini가 강제 따름
+- prompt 지침에도 "다음 중 하나" 명시 → Groq fallback 시도 보장
+
+### service 레이어 책임 분리
+- `price_analyzer.run(llm_client, item_data) -> dict` — 입력/출력만 책임. prompt 조립 + LLM 호출 + JSON 파싱까지
+- `analyze_worker` — 큐 소비 + DB 저장 + 다음 큐 라우팅 + 에러 로깅. 비즈니스 로직 X
+- 워커는 한 가지만(orchestration), 서비스는 한 가지만(분석 결과 만들기). 단위 테스트 시 worker 없이 `run()`만 검증 가능
+
+### 의존성 주입 일관성
+- Phase 3-1에서 `llm_ping_worker(queue_mgr, llm_client)` 패턴 도입
+- Phase 3-2에서 `analyze_worker(queue_mgr, llm_client)` 도 같은 시그니처로 통일
+- main.py 한 곳만 보면 어떤 워커가 어떤 의존성 쓰는지 즉시 파악
+
+### LLM 응답 dict의 호출자 책임
+- `price_analyzer.run()`은 raw dict 그대로 반환 (validation X)
+- `analyze_worker`가 `int(...)`로 형변환 + Item 모델에 매핑
+- 잘못된 응답(필드 누락, 타입 불일치) 시 `KeyError`/`ValueError` → 워커 except에서 catch → `pipeline_logs FAILED` 기록
+- 즉 검증 실패가 워커 에러로 합쳐짐 → 별도 검증 단계 없이 단일 try/except 흐름
+
+### good deal 판정의 두 조건 결합
+- 조건 1: `priceDiffPercent < -20` (호가가 시세보다 20% 이상 저렴)
+- 조건 2: `llmConfidence >= 30` (LLM이 어느 정도 자신 있을 때만)
+- AND로 결합 → 신뢰도 낮은 분석으로 잘못된 알림 차단
+- 분석 자체는 항상 DB에 저장(`status=COMPLETED`) → 사후 데이터 분석 가능
+
+### 운영 도구의 가치 (재발견)
+- `POST /api/test-pipeline`을 매번 99999 고정 itemId로 던지면 collect 단계에서 SKIP → analyze까지 도달 못함
+- 학습용 도구도 random itemId / 매물 템플릿 다양화로 진짜 검증 가능하게 키워야 함
+- 운영 헬스체크/시연용으로도 그대로 활용
 
 ---
 

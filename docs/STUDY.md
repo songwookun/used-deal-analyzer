@@ -126,8 +126,36 @@
 
 ### `dict[str, Any]` 타입 어노테이션
 - `Any` = 값 타입이 다양할 때 (str, int, list, nested dict 등)
-- 어노테이션 없어도 동작은 함. 있으면 타입 체커가 잘못 쓸 때 잡아줌
+- 어노테이션 없어도 동작은 함. 있으면 타입 체커가 잘못 쓸 게 잡아줌
 - `body: dict[str, Any] = {...}` 가 그냥 `body = {...}` 보다 명시적
+
+### lifespan에서 LLMClient 의존성 조립
+- 시크릿/모델은 `settings`에서 읽고 → Provider 인스턴스 → LLMClient → `app.state.llm_client`
+- 워커가 시작되기 **전에** `await llm_client.start()` 끝내고 state에 저장 (반대 순서면 워커가 None 들고 시작 위험)
+- 종료 순서: 워커 cancel → `llm_client.close()` → `queue_mgr.shutdown()`
+  - 워커 살아 있을 때 LLM 닫으면 호출 중 소켓 닫히는 경합
+
+### 검증/디버그 도구도 큐 기반으로
+- 운영 워커(`analyze_worker`)에 검증 코드 끼우지 말고 **별도 큐 + 별도 워커 + 별도 파일**
+  - 같이 두면 운영 코드 손댈 때 검증 코드가 같이 깨짐
+- `llm_ping_queue`(부가 큐) + `llm_ping_worker`(부가 워커) + `POST /api/_debug/llm-ping`(부가 엔드포인트)
+- 운영 매물 파이프라인(collect→validate→analyze→notify)과 완전 독립 → 한쪽이 막혀도 다른 쪽 영향 X
+
+### 202 Accepted (큐에 던지고 즉시 반환)
+- 엔드포인트가 비동기 처리에 위임할 땐 `200 OK` 아니라 `status_code=202`
+- 시맨틱: "받았고, 처리는 비동기로". 결과는 다른 채널(콘솔/DB/별도 조회 API)
+- FastAPI: `@router.post("/path", status_code=202)`
+
+### 검증 워커의 "친구" 권한 (`_protected` 변수 직접 set)
+- 일반적으로 밑줄 변수(`_primary_quota_blocked_date`)는 외부에서 안 건드림
+- 검증 워커는 예외: 본질이 "내부 상태를 강제 조작해서 fallback 경로 실행"
+- 운영 워커는 절대 안 건드림 → 캡슐화 위반은 검증 워커 한 곳에 가둠
+
+### 의존성 주입 시그니처 두 가지
+- 큐만 필요: `async def collect_worker(queue_mgr: QueueManager)` (Phase 1 패턴)
+- 큐 + 외부 의존성: `async def llm_ping_worker(queue_mgr: QueueManager, llm_client: LLMClient)`
+- `app.state` 통해 가져오는 것보다 인자 주입이 결합도 ↓ + 테스트 쉬움
+- Phase 3-2의 analyze_worker도 `llm_client` 인자 받도록 리팩터 예정 → 일관성
 
 ---
 

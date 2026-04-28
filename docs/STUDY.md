@@ -157,6 +157,48 @@
 - `app.state` 통해 가져오는 것보다 인자 주입이 결합도 ↓ + 테스트 쉬움
 - Phase 3-2의 analyze_worker도 `llm_client` 인자 받도록 리팩터 예정 → 일관성
 
+### Phase 2 회귀 버그 2건 (실서버 검증에서 노출)
+
+**버그 1 — `httpx.Timeout(pool=...)` 누락 → startup 즉시 크래시**
+- 원인: `connect/read/write` 만 주고 `pool` 누락. httpx는 4개 다 주거나 default 필요
+- 수정: `pool=self._connect_timeout` 추가
+- 교훈: 코드만 짜고 한 번도 진짜 lifespan으로 안 띄워봤다 = 검증 0회. **커밋 ≠ 검증 완료**
+
+**버그 2 — `callId` UNIQUE 제약 → SUCCESS 행 INSERT 실패 (silent)**
+- 원인: 모델에서 `callId`를 `unique=True`로 잘못 선언. 의도는 한 호출의 SENT/SUCCESS/FAILED를 묶는 **그룹 키**(unique 아님)
+- 결과: SENT INSERT 후 같은 callId로 SUCCESS INSERT 시 `IntegrityError: UNIQUE constraint failed`
+- **silent 묵살의 폐해**: `except SQLAlchemyError: pass`가 IntegrityError를 그냥 삼킴 → SUCCESS 행 디스크 누락 + 호출자도 사실을 모름
+- 수정: `unique=True` → `index=True` (조회 성능 위해 INDEX는 유지)
+- except 처리 정상화: silent pass 대신 `print()`로 노출, raise는 X (로그 실패가 비즈니스 호출 죽이면 안 됨)
+
+### 디버깅 패턴 — 예외가 안 잡힐 때 단계별 좁히기
+- silent 묵살이 의심되면 → except 절을 점진적으로 넓혀 진짜 정체 확인
+- 순서: `except SpecificError` → `except Exception` → `except BaseException`
+- `BaseException`까지 잡히면 `asyncio.CancelledError` 같은 시스템 예외
+- `Exception`까진 잡히는데 안 잡혔다면 import 잘못이거나 다른 except 가 가로챔
+- 진단 끝나면 `BaseException` catch는 반드시 제거 (CancelledError 가로채면 task 종료가 안 됨)
+- BEFORE/AFTER print로 "어디까지 실행됐나" 표시 → 숨은 await 멈춤 위치 확인
+
+### SQLite 마이그레이션의 한계 — column-level UNIQUE 제거
+- SQLite는 `ALTER TABLE ... ALTER COLUMN` 미지원
+- alembic의 `batch_alter_table` 패턴이 보통 우회책 (임시 테이블 swap)
+- 그러나 **column-level UNIQUE 제거**는 batch + `copy_from`으로도 안 떨어짐
+  - 이유: alembic이 reflect한 기존 스키마(UNIQUE 포함)를 우선시
+  - `copy_from`에 unique=False 명시해도 무시됨
+- **fallback 패턴 — raw SQL 직접**:
+  1. 새 스키마(UNIQUE 없음)로 임시 테이블 `_new` 생성
+  2. `INSERT INTO _new SELECT ... FROM old`로 데이터 복사
+  3. `DROP TABLE old`
+  4. `ALTER TABLE _new RENAME TO old`
+  5. `CREATE INDEX` 별도 (UNIQUE 자동 INDEX는 사라졌으니까)
+- alembic autogenerate는 UNIQUE **추가/제거**를 reflect 못 잡는 경우 많음 → 직접 작성
+
+### "검증 = 큐를 통한 실서버 호출"의 가치
+- 코드만 짜고 단위 테스트만 돌리면 위 두 버그 노출 X
+- 진짜 lifespan + 진짜 외부 API + 진짜 DB INSERT 한 번 돌려야 회귀 노출
+- 큐 기반 검증 채널(`/_debug/llm-ping`)이 운영 헬스체크 도구로도 영구 활용 가능
+- **검증을 운영 코드와 같은 경로로 흘리는 게 핵심** (별도 스크립트 X)
+
 ---
 
 ## 2026-04-15 (Phase 2: 외부 API 연동)

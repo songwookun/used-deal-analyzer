@@ -100,7 +100,7 @@ class ApiReqResLog(Base):
     __tablename__ = "api_req_res_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    callId: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    callId: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
     itemId: Mapped[int | None] = mapped_column(Integer, nullable=True)
     apiType: Mapped[str] = mapped_column(String(20), nullable=False)
     event: Mapped[str] = mapped_column(String(10), nullable=False)

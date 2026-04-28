@@ -11,7 +11,6 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import async_session_factory
 from app.models import ApiReqResLog
@@ -39,6 +38,7 @@ class ExternalClient:
                 connect=self._connect_timeout,
                 read=self._read_timeout,
                 write=self._write_timeout,
+                pool=self._connect_timeout,
             ),
         )
 
@@ -71,9 +71,10 @@ class ExternalClient:
             async with async_session_factory() as session:
                 session.add(log_entry)
                 await session.commit()
-        except SQLAlchemyError:
-            # 로그 기록 실패는 무시 (실서비스에선 별도 로깅)
-            pass
+        except Exception as e:
+            # 로그 INSERT 실패가 메인 호출 흐름을 죽이면 안 됨 → raise X
+            # 단, silent pass도 디버깅을 막으니 콘솔에 노출만
+            print(f"[ExternalClient] api_req_res_logs INSERT 실패 event={event} call_id={call_id}: {type(e).__name__}: {e!r}")
 
     async def request(
         self,

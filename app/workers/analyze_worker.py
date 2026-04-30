@@ -1,11 +1,14 @@
 import json
 from datetime import datetime
 
+from sqlalchemy import select
+
 from app.core.database import async_session_factory
 from app.core.queue_manager import QueueManager
 from app.models import Item, ItemEmbedding
 from app.services import preprocess, price_analyzer
 from app.services.embedding import EmbeddingClient
+from app.services.item_state import ItemStatus, InvalidStateTransition
 from app.services.llm_client import LLMClient
 from app.services.log_helpers import log_pipeline
 from app.services.price_analyzer import PriceAnalyzerError
@@ -21,26 +24,45 @@ RAG_TOP_K = 3
 RAG_MIN_SCORE = 0.5
 
 
+async def _load_item(session, item_id: int) -> Item | None:
+    return (await session.execute(
+        select(Item).where(Item.itemId == item_id)
+    )).scalar_one_or_none()
+
+
 async def analyze_worker(
     queue_mgr: QueueManager,
     llm_client: LLMClient,
     embedding_client: EmbeddingClient,
 ) -> None:
-    """ANALYZE_QUEUE 소비 → LLM 시세 분석 + 검증 → DB 저장 → 임베딩 저장 → 좋은 매물이면 NOTIFY_QUEUE."""
+    """ANALYZE_QUEUE 소비 → PROCESSING UPDATE → RAG + LLM 분석 → COMPLETED/FAILED UPDATE → 임베딩 저장 → NOTIFY."""
     while True:
         item_data = await queue_mgr.analyze_queue.get()
         try:
             async with async_session_factory() as session:
+                item = await _load_item(session, item_data["itemId"])
+                if item is None:
+                    await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
+                                       stage="price_analyzer", event="FAILED",
+                                       detail={"reason": "items row 없음"})
+                    continue
+
+                try:
+                    item.transition_to(ItemStatus.PROCESSING)
+                except InvalidStateTransition:
+                    await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
+                                       stage="price_analyzer", event="SKIP",
+                                       detail={"reason": f"이미 종착 상태({item.status})"})
+                    continue
+                await session.commit()
+
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
                                    stage="price_analyzer", event="START")
 
                 # === RAG 검색 (Phase 3-4c) ===
-                # 1) 텍스트 정규화 + 임베딩 1회 생성 → 검색/저장 모두 재사용
                 cleaned = preprocess.clean_title(item_data.get("title", ""))
                 query_vec = embedding_client.encode(cleaned) if cleaned else None
 
-                # 2) 유사 매물 검색. 카테고리 필터 X (새 매물은 분류 전).
-                #    실패해도 분석은 진행 (best-effort) → cold-start와 동일 흐름
                 similar_items = []
                 if query_vec is not None:
                     try:
@@ -63,18 +85,22 @@ async def analyze_worker(
                                        detail={"count": len(similar_items),
                                                "top_score": round(similar_items[0].score, 4)})
 
+                # === LLM 분석 ===
                 try:
                     result = await price_analyzer.run(llm_client, item_data,
                                                       similar_items=similar_items)
                 except PriceAnalyzerError as e:
-                    # 검증 실패 → items에 FAILED 저장 + 추적 정보 보존
-                    await _save_failed_item(session, item_data, e)
+                    item.transition_to(ItemStatus.FAILED,
+                                       fail_stage="price_analyzer",
+                                       fail_reason=e.fail_reason)
+                    item.analyzedAt = datetime.now()
+                    await session.commit()
                     await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
                                        stage="price_analyzer", event="FAILED",
                                        detail={"failReason": e.fail_reason, "detail": e.detail})
-                    continue  # 다음 매물
+                    continue
 
-                # 검증 통과 → 정상 흐름
+                # === 분석 통과 → COMPLETED ===
                 category = result.category.value
                 estimated_price = result.estimatedPrice
                 llm_confidence = result.confidence
@@ -89,31 +115,19 @@ async def analyze_worker(
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
                                    stage="result_save", event="START")
 
-                item = Item(
-                    itemId=item_data["itemId"],
-                    platform=item_data.get("platform", "unknown"),
-                    sellerId=item_data["sellerId"],
-                    sellerReliability=item_data.get("sellerReliability"),
-                    title=item_data.get("title", ""),
-                    description=item_data.get("description"),
-                    askingPrice=asking,
-                    estimatedPrice=estimated_price,
-                    priceDiffPercent=price_diff,
-                    category=category,
-                    llmConfidence=llm_confidence,
-                    llmReason=llm_reason,
-                    status="COMPLETED",
-                    collectedAt=item_data.get("collectedAt", datetime.now()),
-                    analyzedAt=datetime.now(),
-                )
-                session.add(item)
+                item.estimatedPrice = estimated_price
+                item.priceDiffPercent = price_diff
+                item.category = category
+                item.llmConfidence = llm_confidence
+                item.llmReason = llm_reason
+                item.analyzedAt = datetime.now()
+                item.transition_to(ItemStatus.COMPLETED)
                 await session.commit()
 
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
                                    stage="result_save", event="SUCCESS")
 
-                # 임베딩 저장 (앞에서 만든 query_vec 재사용 — 추가 encode 호출 X)
-                # 임베딩 실패는 분석 자체를 실패시키지 않음 (best-effort)
+                # === 임베딩 저장 (best-effort) ===
                 try:
                     if query_vec is not None and cleaned:
                         vector_json = json.dumps(query_vec.tolist())
@@ -133,7 +147,7 @@ async def analyze_worker(
                                        stage="embedding", event="FAILED",
                                        detail={"error": str(embed_err), "type": type(embed_err).__name__})
 
-                # 좋은 매물 + 신뢰도 충분 → NOTIFY_QUEUE
+                # === 좋은 매물 NOTIFY ===
                 if price_diff < GOOD_DEAL_THRESHOLD_PERCENT and llm_confidence >= MIN_CONFIDENCE_FOR_NOTIFY:
                     enriched = {
                         **item_data,
@@ -149,31 +163,22 @@ async def analyze_worker(
                                    stage="price_analyzer", event="SUCCESS")
 
         except Exception as e:
-            # LLM 네트워크 실패 등 도메인 예외 외 모든 에러 → pipeline_log에만 기록
             async with async_session_factory() as session:
                 await log_pipeline(session, item_id=item_data.get("itemId", -1),
                                    seller_id=item_data.get("sellerId", "unknown"),
                                    stage="price_analyzer", event="FAILED",
                                    detail={"error": str(e), "type": type(e).__name__})
+                item_id = item_data.get("itemId")
+                if isinstance(item_id, int):
+                    item = await _load_item(session, item_id)
+                    if item is not None:
+                        try:
+                            item.transition_to(ItemStatus.FAILED,
+                                               fail_stage="price_analyzer",
+                                               fail_reason=type(e).__name__)
+                            item.analyzedAt = datetime.now()
+                            await session.commit()
+                        except InvalidStateTransition:
+                            pass
         finally:
             queue_mgr.analyze_queue.task_done()
-
-
-async def _save_failed_item(session, item_data: dict, err: PriceAnalyzerError) -> None:
-    """검증 실패 매물도 items에 FAILED 상태로 저장 (운영 추적용)."""
-    item = Item(
-        itemId=item_data["itemId"],
-        platform=item_data.get("platform", "unknown"),
-        sellerId=item_data["sellerId"],
-        sellerReliability=item_data.get("sellerReliability"),
-        title=item_data.get("title", ""),
-        description=item_data.get("description"),
-        askingPrice=item_data.get("askingPrice", 0),
-        status="FAILED",
-        failStage="price_analyzer",
-        failReason=err.fail_reason,
-        collectedAt=item_data.get("collectedAt", datetime.now()),
-        analyzedAt=datetime.now(),
-    )
-    session.add(item)
-    await session.commit()

@@ -1,13 +1,16 @@
+from datetime import datetime
+
 from sqlalchemy import select
 
 from app.core.database import async_session_factory
 from app.core.queue_manager import QueueManager
 from app.models import Item
+from app.services.item_state import ItemStatus
 from app.services.log_helpers import log_pipeline
 
 
 async def collect_worker(queue_mgr: QueueManager) -> None:
-    """COLLECT_QUEUE 소비 → 중복 체크 → VALIDATE_QUEUE로 전달."""
+    """COLLECT_QUEUE 소비 → items INSERT(PENDING) → VALIDATE_QUEUE로 전달."""
     while True:
         item_data = await queue_mgr.collect_queue.get()
         try:
@@ -22,6 +25,21 @@ async def collect_worker(queue_mgr: QueueManager) -> None:
                                        stage="item_collector", event="SKIP",
                                        detail={"reason": "이미 수집된 매물"})
                     continue
+
+                item = Item(
+                    itemId=item_data["itemId"],
+                    platform=item_data.get("platform", "unknown"),
+                    sellerId=item_data["sellerId"],
+                    sellerReliability=item_data.get("sellerReliability"),
+                    title=item_data.get("title", ""),
+                    description=item_data.get("description"),
+                    askingPrice=item_data.get("askingPrice", 0),
+                    category="UNKNOWN",
+                    status=ItemStatus.PENDING.value,
+                    collectedAt=item_data.get("collectedAt", datetime.now()),
+                )
+                session.add(item)
+                await session.commit()
 
                 await queue_mgr.validate_queue.put(item_data)
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],

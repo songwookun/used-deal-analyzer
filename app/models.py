@@ -44,6 +44,23 @@ class Item(Base):
     createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    def transition_to(
+        self,
+        target: "ItemStatus",
+        *,
+        fail_stage: str | None = None,
+        fail_reason: str | None = None,
+    ) -> None:
+        """status 전이 + 부수 필드 갱신을 한 곳에서."""
+        from app.services.item_state import ItemStatus, assert_transition
+        current = ItemStatus(self.status)
+        assert_transition(current, target)
+        self.status = target.value
+        if fail_stage is not None:
+            self.failStage = fail_stage
+        if fail_reason is not None:
+            self.failReason = fail_reason
+
 
 class ItemImage(Base):
     __tablename__ = "item_images"

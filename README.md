@@ -18,7 +18,10 @@
 | **Phase 3-4a** | RAG 임베딩 인프라 (sentence-transformers 다국어 모델 + 한국 중고거래 노이즈 제거 preprocess) | ✅ |
 | **Phase 3-4b** | 코사인 유사도 + 유사 매물 검색 (numpy vectorization + argpartition top-K + 임계 컷) | ✅ |
 | **Phase 3-4c** | prompt_builder + S-Prompt 통합 (검색 결과를 markdown 표로 LLM 프롬프트에 주입) | ✅ |
-| Phase 4 | Telegram/Discord 실제 알림 + 상태 머신 (PENDING → COMPLETED/FAILED/TIMEOUT) + retry | ⬜ |
+| **Phase 4-b-1** | items 라이프사이클 추적 (collect→PENDING→PROCESSING→COMPLETED/FAILED/SKIPPED) + `Item.transition_to` 전이 룰 | ✅ |
+| Phase 4-b-2 | sweeper 워커 + TIMEOUT 감지 (PROCESSING이 N분 이상 박힌 매물 강제 정리) | ⬜ |
+| Phase 4-c | retry 정책 (FAILED/TIMEOUT 매물을 PENDING으로 reset 후 재투입, retryCount) | ⬜ |
+| Phase 4-a | Telegram/Discord 실제 알림 발송 (notification_send 구현) | ⬜ |
 | Phase 5 | 운영 안정성 (Graceful shutdown, 헬스체크, 통계 API, 일간 리포트) | ⬜ |
 
 ---

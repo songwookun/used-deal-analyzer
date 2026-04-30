@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from app.api.routes import router
 from app.core.config import settings
 from app.core.queue_manager import QueueManager
+from app.services.embedding import EmbeddingClient
 from app.services.llm_client import GeminiProvider, GroqProvider, LLMClient
 from app.workers.analyze_worker import analyze_worker
 from app.workers.collect_worker import collect_worker
@@ -27,10 +28,15 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = llm_client
     print("LLM 클라이언트 초기화 완료 (primary=gemini, fallback=groq)")
 
+    embedding_client = EmbeddingClient()
+    embedding_client.start()  # 동기 호출 (모델 로드 ~5초). 첫 분석 지연 방지 위해 lifespan에서 1회 로드
+    app.state.embedding_client = embedding_client
+    print("임베딩 클라이언트 초기화 완료 (paraphrase-multilingual-MiniLM-L12-v2, 384d)")
+
     workers = [
         asyncio.create_task(collect_worker(queue_mgr)),
         asyncio.create_task(validate_worker(queue_mgr)),
-        asyncio.create_task(analyze_worker(queue_mgr, llm_client)),
+        asyncio.create_task(analyze_worker(queue_mgr, llm_client, embedding_client)),
         asyncio.create_task(notify_worker(queue_mgr)),
         asyncio.create_task(llm_ping_worker(queue_mgr, llm_client)),
     ]
@@ -43,6 +49,7 @@ async def lifespan(app: FastAPI):
         w.cancel()
     # return_exceptions=True 안 하면 CancelledError가 위로 터져서 종료 로직 깨짐
     await asyncio.gather(*workers, return_exceptions=True)
+    embedding_client.close()
     await llm_client.close()
     await queue_mgr.shutdown()
     print("워커 종료 완료")

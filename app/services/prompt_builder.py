@@ -38,26 +38,44 @@ def _build_similar_table(similar_items: list[SimilarItem]) -> str:
     return "\n".join(lines)
 
 
+def _build_trend_block(trend_summary: dict | None) -> str:
+    """카테고리 트렌드 요약 → markdown 줄 1~N개. None/빈 dict면 빈 문자열."""
+    if not trend_summary:
+        return ""
+    lines = ["[참고: 카테고리 검색 트렌드 (최근 7일 vs 이전 7일, 네이버 데이터랩)]"]
+    for cat, t in trend_summary.items():
+        lines.append(f"- {cat}: {t['label']} ({t['changePercent']:+.1f}%)")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_s_prompt(
     item_data: dict,
     similar_items: list[SimilarItem],
     category_enum: list[str],
+    trend_summary: dict | None = None,
 ) -> str:
-    """매물 + 검색 결과 → 한국어 LLM 프롬프트.
+    """매물 + 검색 결과 + 카테고리 트렌드 → 한국어 LLM 프롬프트.
 
-    similar_items=[] → RAG context 없는 기본 형태 (Phase 3-2 호환).
+    similar_items=[] → RAG context 생략 (cold-start).
+    trend_summary=None → 트렌드 컨텍스트 생략 (키 비활성 또는 캐시 비어있음).
     """
     title = item_data.get("title", "")
     description = item_data.get("description") or "(설명 없음)"
     asking = item_data.get("askingPrice", 0)
     enum_str = ", ".join(category_enum)
 
-    parts = ["당신은 한국 중고거래 매물 분석 전문가입니다."]
+    parts = ["당신은 한국 쇼핑 매물 시세/트렌드 분석 전문가입니다."]
 
     similar_block = _build_similar_table(similar_items)
     if similar_block:
         parts.append("")
         parts.append(similar_block)
+
+    trend_block = _build_trend_block(trend_summary)
+    if trend_block:
+        parts.append("")
+        parts.append(trend_block)
 
     parts.append(
         f"[새 매물]\n"

@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 3
     LLM_TIMEOUT_SECONDS: float = 30.0
 
-    model_config = {"env_file": ".env"}
+    # 알림 (Phase 4-a). 비면 LogNotifier (stdout) 사용.
+    DISCORD_WEBHOOK_URL: str = ""
+
+    # 네이버 데이터랩 (Phase 6). 둘 중 하나라도 비면 트렌드 기능 비활성.
+    NAVER_DATALAB_CLIENT_ID: str = ""
+    NAVER_DATALAB_CLIENT_SECRET: str = ""
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

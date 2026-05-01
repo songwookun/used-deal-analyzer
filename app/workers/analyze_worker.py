@@ -1,9 +1,11 @@
+import asyncio
 import json
 from datetime import datetime
 
 from sqlalchemy import select
 
 from app.core.database import async_session_factory
+from app.core.lifecycle import shutdown_event
 from app.core.queue_manager import QueueManager
 from app.models import Item, ItemEmbedding
 from app.services import preprocess, price_analyzer
@@ -13,6 +15,7 @@ from app.services.llm_client import LLMClient
 from app.services.log_helpers import log_pipeline
 from app.services.price_analyzer import PriceAnalyzerError
 from app.services.similar_search import search_similar
+from app.services.trend_cache import TrendCache
 
 
 # confidence가 이 값 미만이면 좋은 매물이라도 알림 안 보냄 (분석은 저장)
@@ -34,10 +37,16 @@ async def analyze_worker(
     queue_mgr: QueueManager,
     llm_client: LLMClient,
     embedding_client: EmbeddingClient,
+    trend_cache: TrendCache | None = None,
 ) -> None:
     """ANALYZE_QUEUE 소비 → PROCESSING UPDATE → RAG + LLM 분석 → COMPLETED/FAILED UPDATE → 임베딩 저장 → NOTIFY."""
-    while True:
-        item_data = await queue_mgr.analyze_queue.get()
+    while not shutdown_event.is_set():
+        try:
+            item_data = await asyncio.wait_for(
+                queue_mgr.analyze_queue.get(), timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            continue
         try:
             async with async_session_factory() as session:
                 item = await _load_item(session, item_data["itemId"])
@@ -86,9 +95,13 @@ async def analyze_worker(
                                                "top_score": round(similar_items[0].score, 4)})
 
                 # === LLM 분석 ===
+                trend_summary = trend_cache.all() if trend_cache is not None else None
                 try:
-                    result = await price_analyzer.run(llm_client, item_data,
-                                                      similar_items=similar_items)
+                    result = await price_analyzer.run(
+                        llm_client, item_data,
+                        similar_items=similar_items,
+                        trend_summary=trend_summary,
+                    )
                 except PriceAnalyzerError as e:
                     item.transition_to(ItemStatus.FAILED,
                                        fail_stage="price_analyzer",
@@ -157,6 +170,10 @@ async def analyze_worker(
                         "llmConfidence": llm_confidence,
                         "llmReason": llm_reason,
                     }
+                    if trend_cache is not None:
+                        trend = trend_cache.get(category)
+                        if trend:
+                            enriched["categoryTrend"] = trend
                     await queue_mgr.notify_queue.put(enriched)
 
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],

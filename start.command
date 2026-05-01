@@ -6,7 +6,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WEB_DIR="$PROJECT_DIR/web"
+WEB_DIR="$PROJECT_DIR/Frontend"
 
 # 사전 검증 — 의존성 체크 (없으면 안내 후 종료)
 if ! command -v python3 >/dev/null 2>&1; then
@@ -28,7 +28,7 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
     read -n 1 -s -r -p "엔터 누르면 계속 (.env 없이 시작)..."
 fi
 
-# web/node_modules 없으면 자동 install
+# Frontend/node_modules 없으면 자동 install
 if [ ! -d "$WEB_DIR/node_modules" ]; then
     echo "📦 처음 실행 — npm install 진행 (1~2분)..."
     (cd "$WEB_DIR" && npm install)

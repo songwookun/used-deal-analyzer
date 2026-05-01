@@ -161,7 +161,7 @@ used-deal-analyzer/
 │       └── routes.py                 # /api/test-pipeline, /api/stats, /api/_debug/*
 ├── alembic/                          # DB 마이그레이션
 ├── tests/                            # 테스트
-├── web/                              # Vite + React 프론트엔드
+├── Frontend/                         # Vite + React 프론트엔드
 │   ├── src/
 │   │   ├── App.jsx                   # 사이드바 + Dashboard (검색 통계)
 │   │   ├── SearchPage.jsx            # 검색창 + 결과 카드 5섹션 + Sparkline

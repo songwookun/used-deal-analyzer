@@ -5,7 +5,7 @@ rem 각 cmd 창을 닫으면 해당 서버 종료.
 
 setlocal
 set PROJECT_DIR=%~dp0
-set WEB_DIR=%PROJECT_DIR%web
+set WEB_DIR=%PROJECT_DIR%Frontend
 
 rem 사전 검증
 where python >nul 2>nul

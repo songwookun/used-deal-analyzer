@@ -17,6 +17,7 @@ from app.core.queue_manager import QueueManager
 from app.services.datalab_client import DataLabClient
 from app.services.embedding import EmbeddingClient
 from app.services.llm_client import GeminiProvider, GroqProvider, LLMClient
+from app.services.naver_shop_client import NaverShopClient
 from app.services.notifier import DiscordNotifier, LogNotifier, Notifier
 from app.services.trend_cache import TrendCache
 from app.workers.analyze_worker import analyze_worker
@@ -75,6 +76,21 @@ async def lifespan(app: FastAPI):
     else:
         print("DataLab 키 없음 → 트렌드 기능 비활성")
 
+    # Phase 7: 네이버 쇼핑 검색 (선택). 별도 키 없으면 데이터랩 키 fallback
+    # (네이버는 같은 애플리케이션에 여러 API 권한 추가 가능 → ID/SECRET 공유 OK).
+    shop_client: NaverShopClient | None = None
+    shop_id = settings.NAVER_SHOP_CLIENT_ID or settings.NAVER_DATALAB_CLIENT_ID
+    shop_secret = settings.NAVER_SHOP_CLIENT_SECRET or settings.NAVER_DATALAB_CLIENT_SECRET
+    if shop_id and shop_secret:
+        shop_client = NaverShopClient(shop_id, shop_secret)
+        await shop_client.start()
+        which = "전용 키" if settings.NAVER_SHOP_CLIENT_ID else "데이터랩 키 공유"
+        print(f"네이버 쇼핑 검색 클라이언트 초기화 완료 ({which})")
+    else:
+        print("네이버 쇼핑 키 없음 → /api/search 비활성")
+    app.state.shop_client = shop_client
+    app.state.datalab_client = datalab_client
+
     queue_workers_dict = {
         "collect": asyncio.create_task(collect_worker(queue_mgr)),
         "validate": asyncio.create_task(validate_worker(queue_mgr)),
@@ -122,6 +138,8 @@ async def lifespan(app: FastAPI):
     await notifier.close()
     if datalab_client is not None:
         await datalab_client.close()
+    if shop_client is not None:
+        await shop_client.close()
     await queue_mgr.shutdown()
     print("[shutdown] 완료")
 

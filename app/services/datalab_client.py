@@ -18,6 +18,7 @@ CATEGORY_TO_NAVER_CID: dict[str, str] = {
 
 DATALAB_BASE_URL = "https://openapi.naver.com"
 DATALAB_ENDPOINT = "/v1/datalab/shopping/categories"
+DATALAB_KEYWORD_ENDPOINT = "/v1/datalab/search"   # 통합 검색 트렌드
 
 WINDOW_DAYS = 14
 RAISE_THRESHOLD = 15.0
@@ -78,6 +79,31 @@ class DataLabClient:
                 "label": label_for_change(change),
             })
         return results
+
+    async def fetch_keyword_trend(self, keyword: str) -> list[dict]:
+        """통합 검색 트렌드 — 키워드 단위 14일 시계열 [{period, ratio}]."""
+        end_d = date.today()
+        start_d = end_d - timedelta(days=WINDOW_DAYS)
+        body = {
+            "startDate": start_d.isoformat(),
+            "endDate": end_d.isoformat(),
+            "timeUnit": "date",
+            "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}],
+        }
+        headers = {
+            "X-Naver-Client-Id": self._client_id,
+            "X-Naver-Client-Secret": self._client_secret,
+            "Content-Type": "application/json",
+        }
+        resp = await self._client.request(
+            "POST", DATALAB_KEYWORD_ENDPOINT,
+            api_type="DATALAB_API", json=body, headers=headers,
+        )
+        data = resp.json()
+        results = data.get("results") or []
+        if not results:
+            return []
+        return results[0].get("data", []) or []
 
     async def _fetch_one(self, cid: str, start_d: date, end_d: date) -> list[dict]:
         body = {

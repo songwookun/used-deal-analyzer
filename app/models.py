@@ -171,3 +171,20 @@ class CategoryTrend(Base):
     label: Mapped[str] = mapped_column(String(10), nullable=False)
     rawSeries: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     fetchedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PastSearch(Base):
+    __tablename__ = "past_searches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalizedQuery: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    embedding: Mapped[str] = mapped_column(Text, nullable=False)
+    resultsCount: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    medianPrice: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keywordTrendLabel: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    keywordChangePercent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    llmAssessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    rawResults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    rawTrend: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

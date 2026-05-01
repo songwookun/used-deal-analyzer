@@ -16,7 +16,7 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ItemEmbedding
+from app.models import ItemEmbedding, PastSearch
 from app.services.embedding import json_to_vector
 from app.services.similarity import cosine_similarity_batch
 
@@ -91,5 +91,61 @@ async def search_similar(
             category=row.category,
             price=row.price,
             analyzedPrice=row.analyzedPrice,
+        ))
+    return results
+
+
+@dataclass
+class SimilarSearch:
+    """past_searches 검색 결과 1건."""
+    id: int
+    query: str
+    normalizedQuery: str
+    score: float
+    medianPrice: int | None
+    keywordTrendLabel: str | None
+    keywordChangePercent: float | None
+    createdAt: object   # datetime, type 회피용 object
+
+
+async def search_similar_searches(
+    session: AsyncSession,
+    query_vector: np.ndarray,
+    top_k: int = 3,
+    min_score: float = 0.4,
+    exclude_id: int | None = None,
+) -> list[SimilarSearch]:
+    """past_searches에서 query_vector와 가장 유사한 top_k건."""
+    stmt = select(PastSearch)
+    if exclude_id is not None:
+        stmt = stmt.where(PastSearch.id != exclude_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        return []
+
+    vectors = [json_to_vector(row.embedding) for row in rows]
+    matrix = np.vstack(vectors)
+    scores = cosine_similarity_batch(query_vector, matrix)
+
+    n = scores.shape[0]
+    k = min(top_k, n)
+    top_idx_unsorted = np.argpartition(scores, -k)[-k:]
+    top_idx = top_idx_unsorted[np.argsort(-scores[top_idx_unsorted])]
+
+    results: list[SimilarSearch] = []
+    for idx in top_idx:
+        score = float(scores[idx])
+        if score < min_score:
+            continue
+        row = rows[idx]
+        results.append(SimilarSearch(
+            id=row.id,
+            query=row.query,
+            normalizedQuery=row.normalizedQuery,
+            score=score,
+            medianPrice=row.medianPrice,
+            keywordTrendLabel=row.keywordTrendLabel,
+            keywordChangePercent=row.keywordChangePercent,
+            createdAt=row.createdAt,
         ))
     return results

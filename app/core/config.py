@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     NAVER_DATALAB_CLIENT_ID: str = ""
     NAVER_DATALAB_CLIENT_SECRET: str = ""
 
+    # 네이버 쇼핑 검색 (Phase 7). 데이터랩과 같은 키 그대로 써도 OK
+    # (네이버는 같은 애플리케이션에 여러 API 권한 추가 가능). 비면 /api/search 비활성.
+    NAVER_SHOP_CLIENT_ID: str = ""
+    NAVER_SHOP_CLIENT_SECRET: str = ""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

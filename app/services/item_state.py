@@ -30,6 +30,10 @@ _ALLOWED_TRANSITIONS: dict[ItemStatus, frozenset[ItemStatus]] = {
         ItemStatus.SKIPPED,
         ItemStatus.TIMEOUT,
     }),
+    # Phase 4-c: retry_worker가 TIMEOUT 매물을 PENDING으로 reset 가능
+    ItemStatus.TIMEOUT: frozenset({
+        ItemStatus.PENDING,
+    }),
 }
 
 

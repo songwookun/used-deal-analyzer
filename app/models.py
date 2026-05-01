@@ -44,6 +44,11 @@ class Item(Base):
     createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    # Phase 4-c: retry 정책
+    retryCount: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    nextRetryAt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rawInput: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     def transition_to(
         self,
         target: "ItemStatus",
@@ -152,3 +157,17 @@ class ItemEmbedding(Base):
     analyzedPrice: Mapped[int | None] = mapped_column(Integer, nullable=True)
     vector: Mapped[str] = mapped_column(Text, nullable=False)  # 384차원 벡터를 JSON 문자열로 저장
     createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CategoryTrend(Base):
+    __tablename__ = "category_trends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    naverCid: Mapped[str] = mapped_column(String(20), nullable=False)
+    periodStart: Mapped[date] = mapped_column(Date, nullable=False)
+    periodEnd: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    changePercent: Mapped[float] = mapped_column(Float, nullable=False)
+    label: Mapped[str] = mapped_column(String(10), nullable=False)
+    rawSeries: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    fetchedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

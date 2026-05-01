@@ -1,6 +1,9 @@
+import asyncio
+
 from sqlalchemy import select
 
 from app.core.database import async_session_factory
+from app.core.lifecycle import shutdown_event
 from app.core.queue_manager import QueueManager
 from app.models import Item
 from app.services.item_state import ItemStatus, InvalidStateTransition
@@ -15,8 +18,13 @@ async def _load_item(session, item_id: int) -> Item | None:
 
 async def validate_worker(queue_mgr: QueueManager) -> None:
     """VALIDATE_QUEUE 소비 → seller_check + item_validator 2단계 검증 → ANALYZE_QUEUE로 전달."""
-    while True:
-        item_data = await queue_mgr.validate_queue.get()
+    while not shutdown_event.is_set():
+        try:
+            item_data = await asyncio.wait_for(
+                queue_mgr.validate_queue.get(), timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            continue
         try:
             async with async_session_factory() as session:
                 item = await _load_item(session, item_data["itemId"])

@@ -151,22 +151,47 @@ class LLMClient:
         self.primary = primary
         self.fallback = fallback
         self._primary_quota_blocked_date: date | None = None
+        self._started = False
 
     async def start(self) -> None:
         await self.primary.start()
         if self.fallback is not None:
             await self.fallback.start()
+        self._started = True
 
     async def close(self) -> None:
         await self.primary.close()
         if self.fallback is not None:
             await self.fallback.close()
+        self._started = False
 
     def _is_primary_blocked_today(self) -> bool:
         """오늘 primary가 quota 차단 상태인지 판단 (자정 지나면 자동 해제)."""
         if self._primary_quota_blocked_date is None:
             return False
         return self._primary_quota_blocked_date == date.today()
+
+    def get_health_state(self) -> dict:
+        """헬스체크용 LLM 상태 요약 (실제 호출 X, 캐시된 플래그만)."""
+        if not self._started:
+            primary = "not_initialized"
+        elif self._is_primary_blocked_today():
+            primary = "exhausted"
+        else:
+            primary = "available"
+
+        if self.fallback is None:
+            fallback = "none"
+        elif not self._started:
+            fallback = "not_initialized"
+        else:
+            fallback = "available"
+
+        return {
+            "primary": primary,
+            "fallback": fallback,
+            "primary_quota_exhausted_today": self._is_primary_blocked_today(),
+        }
 
     async def analyze(self, prompt: str, schema: dict | None = None) -> dict:
         """

@@ -110,6 +110,7 @@ async def run(
     llm_client: LLMClient,
     item_data: dict,
     similar_items: list[SimilarItem] | None = None,
+    trend_summary: dict | None = None,
 ) -> AnalysisResult:
     """매물 분석 1건 실행 (S-Prompt 통합).
 
@@ -123,7 +124,10 @@ async def run(
     검증 실패 → PriceAnalyzerError (failReason 보유)
     LLM 자체 실패 → 그 예외 그대로 raise (worker가 처리)
     """
-    prompt = build_s_prompt(item_data, similar_items or [], CATEGORY_ENUM)
+    prompt = build_s_prompt(
+        item_data, similar_items or [], CATEGORY_ENUM,
+        trend_summary=trend_summary,
+    )
     raw = await llm_client.analyze(prompt, schema=ANALYSIS_SCHEMA)
 
     if not isinstance(raw, dict):

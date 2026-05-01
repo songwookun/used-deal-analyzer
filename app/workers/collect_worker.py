@@ -1,8 +1,10 @@
+import asyncio
 from datetime import datetime
 
 from sqlalchemy import select
 
 from app.core.database import async_session_factory
+from app.core.lifecycle import shutdown_event
 from app.core.queue_manager import QueueManager
 from app.models import Item
 from app.services.item_state import ItemStatus
@@ -11,8 +13,13 @@ from app.services.log_helpers import log_pipeline
 
 async def collect_worker(queue_mgr: QueueManager) -> None:
     """COLLECT_QUEUE 소비 → items INSERT(PENDING) → VALIDATE_QUEUE로 전달."""
-    while True:
-        item_data = await queue_mgr.collect_queue.get()
+    while not shutdown_event.is_set():
+        try:
+            item_data = await asyncio.wait_for(
+                queue_mgr.collect_queue.get(), timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            continue
         try:
             async with async_session_factory() as session:
                 await log_pipeline(session, item_id=item_data["itemId"], seller_id=item_data["sellerId"],
@@ -37,6 +44,7 @@ async def collect_worker(queue_mgr: QueueManager) -> None:
                     category="UNKNOWN",
                     status=ItemStatus.PENDING.value,
                     collectedAt=item_data.get("collectedAt", datetime.now()),
+                    rawInput=item_data,
                 )
                 session.add(item)
                 await session.commit()

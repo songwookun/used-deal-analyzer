@@ -26,7 +26,9 @@
 | **Phase 5-b** | 헬스체크 강화 (`/health/live` + `/health/ready` + 워커 alive/DB ping/LLM quota 상태) | ✅ |
 | **Phase 5-c** | 통계/운영 API `/api/stats` (status 분포 + failure 집계 + retry 통계 + 알림 + recent N) | ✅ |
 | **Phase 6** | 네이버 데이터랩 카테고리 트렌드 통합 (DataLabClient + TrendCache + trend_collector_worker + LLM 프롬프트/embed/stats 주입) | ✅ |
-| **Frontend (운영 대시보드)** | Vite + React 미니멀 대시보드 — 헬스 표시 / 매물 투입 / 상태 분포 / 트렌드 / 실패 사유 / 최근 매물 (자동 3초 갱신) | ✅ |
+| **Phase 7** | 도메인 피벗 — 키워드 검색 분석 (네이버 쇼핑 + 데이터랩 Keywords + RAG 누적 + LLM 종합 → SearchAnalysis) + `/api/search/{id}` 캐시 로드 (재호출 X) | ✅ |
+| **Frontend** | Vite + React + lucide-react — 사이드바 + Search 페이지(검색창/결과 5섹션/Sparkline/캐시 배너) + Dashboard 페이지(검색 통계 / 트렌드 예측 분포 / 가격대 분포 / 외부 API 호출 / 최근 검색) | ✅ |
+| **실행 스크립트** | macOS `start.command` + Windows `start.bat` — 더블클릭 한 번으로 백엔드 + 프론트 동시 실행 + 브라우저 자동 오픈 | ✅ |
 
 ---
 
@@ -159,15 +161,18 @@ used-deal-analyzer/
 │       └── routes.py                 # /api/test-pipeline, /api/stats, /api/_debug/*
 ├── alembic/                          # DB 마이그레이션
 ├── tests/                            # 테스트
-├── web/                              # Vite + React 운영 대시보드 (백엔드 API 소비)
+├── web/                              # Vite + React 프론트엔드
 │   ├── src/
-│   │   ├── App.jsx                   # 단일 페이지 대시보드 (Vercel/Linear 톤)
-│   │   ├── App.css
-│   │   ├── index.css                 # 디자인 토큰 (border/색상/폰트)
+│   │   ├── App.jsx                   # 사이드바 + Dashboard (검색 통계)
+│   │   ├── SearchPage.jsx            # 검색창 + 결과 카드 5섹션 + Sparkline
+│   │   ├── App.css                   # shadcn/ui 톤 디자인 시스템
+│   │   ├── index.css                 # 디자인 토큰 + 글로벌
 │   │   └── main.jsx
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
+├── start.command                     # macOS 원클릭 실행 (더블클릭 가능)
+├── start.bat                         # Windows 원클릭 실행 (더블클릭 가능)
 ├── requirements.txt
 └── .env                              # 환경변수 (git 미포함)
 ```
@@ -284,6 +289,21 @@ LLM 응답을 그대로 믿지 않고 도메인 검증:
 
 ## 실행 방법
 
+### 원클릭 (추천)
+
+```bash
+# macOS — Finder에서 더블클릭 또는 터미널에서:
+./start.command
+
+# Windows — 탐색기에서 더블클릭 또는 cmd에서:
+start.bat
+```
+
+→ 백엔드(8000) + 프론트엔드(5173) 새 터미널 창에 자동 실행 + 브라우저 자동 오픈.
+첫 실행 시 `npm install`도 자동.
+
+### 수동 (필요할 때만)
+
 ```bash
 # 1. 의존성 설치
 pip install -r requirements.txt
@@ -296,6 +316,8 @@ GROQ_API_KEY=your_groq_key
 DISCORD_WEBHOOK_URL=                       # 비우면 LogNotifier (stdout)
 NAVER_DATALAB_CLIENT_ID=                   # 비우면 트렌드 기능 비활성
 NAVER_DATALAB_CLIENT_SECRET=
+NAVER_SHOP_CLIENT_ID=                      # 비우면 데이터랩 키로 fallback
+NAVER_SHOP_CLIENT_SECRET=
 EOF
 
 # 3. DB 마이그레이션
@@ -304,13 +326,13 @@ alembic upgrade head
 # 4. 백엔드 실행 (첫 시작 시 임베딩 모델 ~5초 + DataLab 초기 fetch)
 uvicorn app.main:app --reload   # → http://localhost:8000
 
-# 5. (선택) 프론트엔드 실행 — 별도 터미널
+# 5. 프론트엔드 실행 — 별도 터미널
 cd web
 npm install                      # 첫 실행만
 npm run dev                      # → http://localhost:5173
 
-# 6. mock 매물 1건 파이프라인 통과
-curl -X POST http://localhost:8000/api/test-pipeline
+# 6. (디버그) mock 매물 1건 파이프라인 통과
+curl -X POST http://localhost:8000/api/_debug/test-pipeline
 
 # 디버그 옵션:
 #   ?seller=F        → SKIPPED (LOW_RELIABILITY)

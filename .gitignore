@@ -21,4 +21,4 @@ docs/
 # 프론트엔드 빌드 산출물
 web/node_modules/
 web/dist/
-web/.vite/
+web/.vite/.DS_Store

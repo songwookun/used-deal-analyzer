@@ -9,6 +9,8 @@ import {
   Clock,
   RefreshCw,
   AlertCircle,
+  Brain,
+  Layers,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API ?? 'http://localhost:8000'
@@ -40,12 +42,12 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
     }
   }, [])
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { refreshRecent() }, [refreshRecent])
 
   // 대시보드에서 진입 시 해당 검색 자동 로드
   useEffect(() => {
     if (autoLoadId) {
-      // recent 목록에서 query 찾아서 입력창에도 채움
       const found = recent.find(r => r.id === autoLoadId)
       const query = found?.query ?? ''
       loadCached(autoLoadId, query)
@@ -97,8 +99,11 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
   return (
     <>
       <div className="page-header">
-        <h1>상품 검색 분석</h1>
-        <p className="muted">키워드 → 네이버 쇼핑 + 데이터랩 트렌드 + RAG → LLM 종합 평가</p>
+        <div>
+          <span className="crumb">분석 콘솔</span>
+          <h1>키워드 분석</h1>
+          <p>키워드 → 네이버 쇼핑 + 데이터랩 트렌드 + RAG 유사 검색 → LLM 종합 평가 파이프라인.</p>
+        </div>
       </div>
 
       <form className="search-form" onSubmit={runSearch}>
@@ -106,7 +111,7 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
           <SearchIcon size={16} className="search-input-icon" strokeWidth={2} />
           <input
             className="search-input"
-            placeholder="상품명을 입력하세요 (예: 갤럭시 버즈 프로 2)"
+            placeholder="분석할 키워드를 입력하세요 (예: 갤럭시 버즈 프로 2)"
             value={q}
             onChange={e => setQ(e.target.value)}
             disabled={loading}
@@ -114,15 +119,15 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
           />
         </div>
         <button className="btn primary" type="submit" disabled={loading || !q.trim()}>
-          <Sparkles size={14} strokeWidth={2} />
-          {loading ? '분석 중…' : '분석'}
+          <Sparkles size={14} strokeWidth={2.25} />
+          {loading ? '분석 중…' : '분석 실행'}
         </button>
       </form>
 
       {recent.length > 0 && (
         <div className="recent-card">
-          <div className="muted small recent-label">
-            <Clock size={12} strokeWidth={2} /> 최근 검색 (클릭 시 저장된 분석 즉시 로드)
+          <div className="recent-label muted">
+            <Clock size={11} strokeWidth={2.25} /> 최근 검색 · 클릭 시 저장된 결과 로드
           </div>
           <div className="recent-chips">
             {recent.map(r => (
@@ -142,9 +147,9 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
       {result?.cached && (
         <div className="cached-banner">
           <Clock size={14} strokeWidth={2} />
-          <span>저장된 결과 ({result.cachedAt ? new Date(result.cachedAt).toLocaleString('ko-KR') : ''})</span>
+          <span>저장된 결과 · {result.cachedAt ? new Date(result.cachedAt).toLocaleString('ko-KR') : ''}</span>
           <button className="link-btn" onClick={runSearch} type="button">
-            <RefreshCw size={12} strokeWidth={2} /> 새로 검색
+            <RefreshCw size={12} strokeWidth={2.25} /> 파이프라인 재실행
           </button>
         </div>
       )}
@@ -154,7 +159,7 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
           <AlertCircle size={16} strokeWidth={2} />
           <div>
             <div className="error-title">분석 실패</div>
-            <div className="muted small">{typeof error === 'string' ? error : JSON.stringify(error)}</div>
+            <div className="muted small mono">{typeof error === 'string' ? error : JSON.stringify(error)}</div>
           </div>
         </div>
       )}
@@ -163,8 +168,8 @@ export default function SearchPage({ autoLoadId, onConsumeAutoLoad }) {
         <div className="loading-card">
           <div className="spinner" />
           <div>
-            <div>분석 중…</div>
-            <div className="muted small">네이버 API + LLM 호출 (5~15초 소요)</div>
+            <div className="loading-card-text">파이프라인 실행 중…</div>
+            <div className="muted small mono">네이버 쇼핑 · 데이터랩 · RAG · LLM (5–15초)</div>
           </div>
         </div>
       )}
@@ -181,14 +186,27 @@ function ResultStack({ data }) {
 
   return (
     <div className="result-stack">
-      <div className="hero-card">
-        <div className="muted small">검색어</div>
+      <div className="result-hero">
+        <div className="result-hero-crumb">분석 대상</div>
         <h2 className="hero-query">"{data.query}"</h2>
-        <div className="muted small">{data.shopResultsTotal}개 상품 · 가격 중앙값 {formatPrice(stats.median)}</div>
+        <div className="result-hero-meta">
+          <span>상품 <strong>{data.shopResultsTotal ?? 0}</strong>건</span>
+          <span>·</span>
+          <span>중앙가 <strong>{formatPrice(stats.median)}</strong></span>
+          {stats.count != null && (
+            <>
+              <span>·</span>
+              <span>표본 <strong>{stats.count}</strong>건</span>
+            </>
+          )}
+        </div>
       </div>
 
-      <Section title="LLM 종합 평가" icon={Sparkles}>
-        <div className="reason-card">{a.reason}</div>
+      <Section title="LLM 종합 평가" icon={Brain}>
+        <div className="verdict-card">
+          <div className="verdict-label"><Sparkles size={11} strokeWidth={2.5} /> 추론 근거</div>
+          <div className="verdict-text">{a.reason || '평가 본문 없음'}</div>
+        </div>
         <div className="pill-grid">
           <Pill label="카테고리 위치">{a.categoryRank}</Pill>
           <Pill label="가성비 평가">{a.valueAssessment}</Pill>
@@ -200,7 +218,7 @@ function ResultStack({ data }) {
       </Section>
 
       <div className="grid-2">
-        <Section title="키워드 검색 트렌드" subtitle="네이버 데이터랩 14일">
+        <Section title="키워드 트렌드" subtitle="네이버 데이터랩 · 14일">
           <TrendCard trend={trend} />
         </Section>
 
@@ -225,19 +243,27 @@ function ResultStack({ data }) {
       )}
 
       {data.similarSearches && data.similarSearches.length > 0 && (
-        <Section title="과거 유사 검색" subtitle="RAG 임베딩 검색">
-          <div className="similar-strip">
-            {data.similarSearches.map((s, i) => (
-              <div key={i} className="similar-chip">
-                <span>{s.query}</span>
-                <span className="muted small mono">유사도 {s.score.toFixed(2)}</span>
-              </div>
-            ))}
+        <Section title="RAG 근거 자료" subtitle="과거 유사 검색 임베딩 매치" icon={Layers}>
+          <div className="rag-evidence">
+            <div className="rag-evidence-label">
+              <Layers size={11} strokeWidth={2.5} /> 유사 검색 {data.similarSearches.length}건 매칭
+            </div>
+            <div className="similar-strip">
+              {data.similarSearches.map((s, i) => (
+                <div key={i} className="similar-chip">
+                  <span>{s.query}</span>
+                  <span className="score">유사도 {s.score.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </Section>
       )}
 
-      <Section title="검색 결과" subtitle={`${data.shopResultsTotal}건 중 상위 ${(data.shopResults || []).length}`}>
+      <Section
+        title="검색 결과"
+        subtitle={`${data.shopResultsTotal ?? 0}건 중 상위 ${(data.shopResults || []).length}`}
+      >
         <div className="table-wrap">
           <table className="table">
             <thead>
@@ -278,7 +304,7 @@ function Section({ title, subtitle, icon: Icon, children }) {
     <section className="section">
       <div className="section-head">
         <div className="section-title">
-          {Icon && <Icon size={14} strokeWidth={2} className="section-icon" />}
+          {Icon && <Icon size={13} strokeWidth={2.25} className="section-icon" />}
           <h2>{title}</h2>
         </div>
         {subtitle && <span className="muted small">{subtitle}</span>}
@@ -291,7 +317,7 @@ function Section({ title, subtitle, icon: Icon, children }) {
 function Pill({ label, children }) {
   return (
     <div className="pill">
-      <div className="muted small pill-label">{label}</div>
+      <div className="pill-label">{label}</div>
       <div className="pill-value">{children}</div>
     </div>
   )
@@ -302,7 +328,7 @@ function ForecastBadge({ forecast }) {
   const tone = FORECAST_TONE[forecast] ?? 'muted'
   return (
     <span className={`forecast-badge tone-${tone}`}>
-      <Icon size={14} strokeWidth={2} />
+      <Icon size={14} strokeWidth={2.25} />
       {FORECAST_LABEL[forecast] ?? forecast}
     </span>
   )
@@ -321,7 +347,7 @@ function TrendCard({ trend }) {
           {trend.changePercent >= 0 ? '+' : ''}{trend.changePercent?.toFixed(1)}%
         </span>
       </div>
-      <div className="muted small">최근 7일 평균 vs 이전 7일 평균</div>
+      <div className="muted small mono">최근 7일 평균 대비 이전 7일 평균</div>
       {trend.series && trend.series.length > 1 && <Sparkline series={trend.series} />}
     </div>
   )
@@ -341,7 +367,7 @@ function PriceStatGrid({ stats }) {
 function Stat({ label, children }) {
   return (
     <div className="stat-card">
-      <div className="muted small">{label}</div>
+      <div className="stat-card-label">{label}</div>
       <div className="stat-value mono">{children}</div>
     </div>
   )
@@ -361,10 +387,10 @@ function Sparkline({ series }) {
     return { x, y }
   })
   const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-  const area = `${path} L ${points[points.length-1].x} ${H - P} L ${P} ${H - P} Z`
+  const area = `${path} L ${points[points.length - 1].x} ${H - P} L ${P} ${H - P} Z`
   return (
     <svg className="spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-      <path d={area} fill="currentColor" opacity="0.08" />
+      <path d={area} fill="currentColor" opacity="0.10" />
       <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
   )

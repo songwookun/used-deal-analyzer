@@ -7,6 +7,7 @@ __pycache__/
 
 # SQLite DB 파일 (로컬 개발용, 각자 생성해야 함)
 *.db
+*.db.bak.*
 
 # IDE 설정 (본인 에디터 설정이라 공유할 필요 없음)
 .vscode/

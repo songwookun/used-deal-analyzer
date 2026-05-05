@@ -6,6 +6,46 @@
 
 ---
 
+## 빠른 시작 (Quickstart)
+
+처음 클론한 사람이 동작시키는 데 필요한 최소 흐름입니다.
+
+```bash
+# 1) 클론 + 의존성
+git clone <this-repo>
+cd used-deal-analyzer
+pip install -r requirements.txt
+
+# 2) 환경변수 — 템플릿 복사 후 키만 채움
+cp .env.example .env
+# .env 파일을 열어서 최소 GEMINI_API_KEY, GROQ_API_KEY 입력
+# (Discord/Naver 키는 비워둬도 동작 — 해당 기능만 비활성)
+# 각 키 발급처는 .env.example 안 주석 참조
+
+# 3) DB 초기화
+alembic upgrade head
+
+# 4) 실행 (백엔드 + 프론트 동시) — 더블클릭으로도 가능
+./start.command         # macOS
+# start.bat            # Windows
+```
+
+→ http://localhost:5173 에서 대시보드, http://localhost:8000/docs 에서 API.
+
+**필수 vs 선택 키**
+
+| 키 | 필요성 | 빠지면 |
+|---|---|---|
+| `GEMINI_API_KEY` | 필수 | LLM 분석 작동 안 함 |
+| `GROQ_API_KEY` | 필수 (Gemini fallback) | quota 초과 시 분석 중단 |
+| `DISCORD_WEBHOOK_URL` | 선택 | 알림이 stdout 로그로 |
+| `NAVER_DATALAB_CLIENT_ID/SECRET` | 선택 | 트렌드 기능 비활성 |
+| `NAVER_SHOP_CLIENT_ID/SECRET` | 선택 | `/api/search` 비활성 (DataLab 키로 자동 fallback) |
+
+상세 실행 옵션·디버그·SQL 확인은 아래 [실행 방법](#실행-방법) 섹션 참고.
+
+---
+
 ## 진행 현황
 
 | Phase | 내용 | 상태 |
@@ -308,17 +348,11 @@ start.bat
 # 1. 의존성 설치
 pip install -r requirements.txt
 
-# 2. 환경변수 설정 (.env 파일 생성)
-cat > .env << 'EOF'
-DATABASE_URL=sqlite+aiosqlite:///./dev.db
-GEMINI_API_KEY=your_gemini_key
-GROQ_API_KEY=your_groq_key
-DISCORD_WEBHOOK_URL=                       # 비우면 LogNotifier (stdout)
-NAVER_DATALAB_CLIENT_ID=                   # 비우면 트렌드 기능 비활성
-NAVER_DATALAB_CLIENT_SECRET=
-NAVER_SHOP_CLIENT_ID=                      # 비우면 데이터랩 키로 fallback
-NAVER_SHOP_CLIENT_SECRET=
-EOF
+# 2. 환경변수 설정 — .env.example 복사 후 키만 채우기
+cp .env.example .env
+# .env 열어서 GEMINI_API_KEY, GROQ_API_KEY 입력 (필수)
+# Discord 웹훅, 네이버 키는 선택 (비우면 해당 기능만 비활성)
+# 각 키 발급처는 .env.example 내 주석 참조
 
 # 3. DB 마이그레이션
 alembic upgrade head
@@ -327,7 +361,7 @@ alembic upgrade head
 uvicorn app.main:app --reload   # → http://localhost:8000
 
 # 5. 프론트엔드 실행 — 별도 터미널
-cd web
+cd Frontend
 npm install                      # 첫 실행만
 npm run dev                      # → http://localhost:5173
 
